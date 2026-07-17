@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhPty\VTerm\Tests;
 
 use PhPty\VTerm\VTerm;
+use PhPty\VTerm\Wide;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
 
 final class VTermTest extends TestCase
@@ -43,6 +44,24 @@ final class VTermTest extends TestCase
         $this->assertSame($expected, $row);
     }
 
+    public function testTheTwoKindsOfEmptyCellAreDistinguishable(): void
+    {
+        $vterm = new VTerm(1, 10);
+        $vterm->write('日 ');
+
+        // Col 0: the fullwidth character. Col 1: its spacer (renders nothing).
+        // Col 3: an unwritten Narrow Cell. Both cols 1 and 3 have empty text,
+        // but only col 1 is a SpacerTail — that is the distinction ScreenTest
+        // needs to render CJK correctly.
+        $this->assertSame(Wide::wide(), $vterm->cellAt(0, 0)->wide());
+        $this->assertSame(Wide::spacerTail(), $vterm->cellAt(0, 1)->wide());
+        $this->assertTrue($vterm->cellAt(0, 1)->isSpacerTail());
+
+        $this->assertSame(Wide::narrow(), $vterm->cellAt(0, 3)->wide());
+        $this->assertFalse($vterm->cellAt(0, 3)->isSpacerTail());
+        $this->assertSame('', $vterm->cellAt(0, 3)->text());
+    }
+
     public function testEmptyScreenIsAllEmptyCells(): void
     {
         $vterm = new VTerm(2, 4);
@@ -73,7 +92,7 @@ final class VTermTest extends TestCase
     {
         $cells = [];
         for ($col = 0; $col < $cols; $col++) {
-            $cells[] = $vterm->cellAt($row, $col);
+            $cells[] = $vterm->cellAt($row, $col)->text();
         }
 
         return $cells;

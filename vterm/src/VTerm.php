@@ -19,6 +19,9 @@ final class VTerm
     /** GHOSTTY_POINT_TAG_ACTIVE: the active area where the cursor moves. */
     private const POINT_TAG_ACTIVE = 0;
 
+    /** GHOSTTY_CELL_DATA_WIDE: query a cell's width behaviour. */
+    private const CELL_DATA_WIDE = 3;
+
     private FFI $ffi;
 
     /** @var FFI\CData GhosttyTerminal handle */
@@ -73,12 +76,11 @@ final class VTerm
     }
 
     /**
-     * The grapheme cluster rendered at a Cell, as a UTF-8 string. An empty Cell
-     * is the empty string; the second Cell of a fullwidth character is also
-     * empty (its content belongs to the Cell before it). Reading outside the
-     * Screen is an error, not an empty Cell.
+     * The Cell rendered at a position: its grapheme cluster and width behaviour,
+     * snapshotted so it stays valid after the terminal changes. Reading outside
+     * the Screen is an error, not an empty Cell.
      */
-    public function cellAt(int $row, int $col): string
+    public function cellAt(int $row, int $col): Cell
     {
         if ($row < 0 || $row >= $this->rows || $col < 0 || $col >= $this->cols) {
             throw new \OutOfRangeException(
@@ -98,7 +100,30 @@ final class VTerm
             throw new \RuntimeException("grid_ref failed at ({$row}, {$col}) with result {$result}.");
         }
 
-        return $this->graphemesToString(FFI::addr($ref), $row, $col);
+        $text = $this->graphemesToString(FFI::addr($ref), $row, $col);
+        $wide = $this->cellWide(FFI::addr($ref), $row, $col);
+
+        return new Cell($text, $wide);
+    }
+
+    /** @param FFI\CData $ref pointer to GhosttyGridRef */
+    private function cellWide($ref, int $row, int $col): Wide
+    {
+        $cell = $this->ffi->new('GhosttyCell');
+        $result = $this->ffi->ghostty_grid_ref_cell($ref, FFI::addr($cell));
+        if ($result !== self::GHOSTTY_SUCCESS) {
+            throw new \RuntimeException("grid_ref_cell failed at ({$row}, {$col}) with result {$result}.");
+        }
+
+        // ghostty_cell_get takes the cell by value (uint64_t); pass the scalar,
+        // not the CData wrapper, or FFI cannot marshal it.
+        $wide = $this->ffi->new('GhosttyCellWide');
+        $result = $this->ffi->ghostty_cell_get($cell->cdata, self::CELL_DATA_WIDE, FFI::addr($wide));
+        if ($result !== self::GHOSTTY_SUCCESS) {
+            throw new \RuntimeException("cell_get(WIDE) failed at ({$row}, {$col}) with result {$result}.");
+        }
+
+        return Wide::fromInt($wide->cdata);
     }
 
     /** @param FFI\CData $ref pointer to GhosttyGridRef */

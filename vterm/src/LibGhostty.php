@@ -48,11 +48,17 @@ final class LibGhostty
             uint16_t y;
         } GhosttyGridRef;
 
+        typedef uint64_t GhosttyCell;
+        typedef int GhosttyCellData;
+        typedef int GhosttyCellWide;
+
         GhosttyResult ghostty_terminal_new(const void *allocator, GhosttyTerminal *terminal, GhosttyTerminalOptions options);
         void ghostty_terminal_free(GhosttyTerminal terminal);
         void ghostty_terminal_vt_write(GhosttyTerminal terminal, const uint8_t *data, size_t len);
         GhosttyResult ghostty_terminal_grid_ref(GhosttyTerminal terminal, GhosttyPoint point, GhosttyGridRef *out_ref);
         GhosttyResult ghostty_grid_ref_graphemes(const GhosttyGridRef *ref, uint32_t *buf, size_t buf_len, size_t *out_len);
+        GhosttyResult ghostty_grid_ref_cell(const GhosttyGridRef *ref, GhosttyCell *out_cell);
+        GhosttyResult ghostty_cell_get(GhosttyCell cell, GhosttyCellData data, void *out);
         C;
 
     public static function load(?string $libraryDir = null): FFI
