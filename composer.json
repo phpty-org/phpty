@@ -1,0 +1,38 @@
+{
+    "name": "phpty/monorepo",
+    "description": "PhPty development monorepo. Not a distributable package; the modules are split out and released individually.",
+    "type": "project",
+    "require": {
+        "php": "^8.1",
+        "ext-ffi": "*"
+    },
+    "require-dev": {
+        "bamarni/composer-bin-plugin": "^1.9"
+    },
+    "autoload": {
+        "psr-4": {
+            "PhPty\\VTerm\\": "vterm/src/",
+            "PhPty\\Pty\\": "pty/src/",
+            "PhPty\\ScreenTest\\": "screen-test/src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PhPty\\VTerm\\Tests\\": "vterm/tests/",
+            "PhPty\\Pty\\Tests\\": "pty/tests/",
+            "PhPty\\ScreenTest\\Tests\\": "screen-test/tests/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "bamarni/composer-bin-plugin": true
+        },
+        "sort-packages": true
+    },
+    "extra": {
+        "bamarni-bin": {
+            "bin-links": false,
+            "forward-command": true
+        }
+    }
+}

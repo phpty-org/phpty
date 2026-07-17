@@ -1,0 +1,25 @@
+{
+    "name": "phpty/screen-test",
+    "description": "Drive a program through a pty and assert on the screen it renders. Framework-agnostic, with an optional PHPUnit assertion trait.",
+    "license": "MIT",
+    "keywords": ["terminal", "testing", "pty", "screen", "phpunit"],
+    "require": {
+        "php": "^7.4 || ^8.0",
+        "phpty/pty": "self.version",
+        "phpty/vterm": "self.version"
+    },
+    "suggest": {
+        "phpunit/phpunit": "To assert on a rendered Screen from a PHPUnit test via PhPty\\ScreenTest\\PHPUnit\\AssertScreen",
+        "yoast/phpunit-polyfills": "For assertion compatibility across PHPUnit versions when using the trait on PHP 7.4-8.x"
+    },
+    "autoload": {
+        "psr-4": {
+            "PhPty\\ScreenTest\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PhPty\\ScreenTest\\Tests\\": "tests/"
+        }
+    }
+}

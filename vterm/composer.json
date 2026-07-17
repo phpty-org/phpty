@@ -1,0 +1,20 @@
+{
+    "name": "phpty/vterm",
+    "description": "Interpret a terminal byte stream into an inspectable screen by binding libghostty-vt through FFI.",
+    "license": "MIT",
+    "keywords": ["terminal", "vt", "emulator", "ffi", "libghostty"],
+    "require": {
+        "php": "^7.4 || ^8.0",
+        "ext-ffi": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "PhPty\\VTerm\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PhPty\\VTerm\\Tests\\": "tests/"
+        }
+    }
+}
