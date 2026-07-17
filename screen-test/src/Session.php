@@ -63,11 +63,10 @@ final class Session
      * reflects it, then stop once a read finds nothing. Bracket every read and
      * write with this.
      *
-     * Not yet wired: writing the VTerm's replies back to the Subject. A terminal
-     * answers some queries (a cursor-position report, for one), and a Subject
-     * that waits for the answer would hang. libghostty-vt surfaces those replies
-     * through a write-pty callback; until that is bound, Sync only reads, which
-     * suffices for Subjects that do not query — see screen-test/CONTEXT.md.
+     * A Sync also writes back: the VTerm may have replies to send upstream (a
+     * cursor-position report, for one), and a Subject waiting for the answer
+     * would hang if it never arrived. So each drained chunk's replies go back to
+     * the Subject — see screen-test/CONTEXT.md.
      */
     public function sync(): void
     {
@@ -78,6 +77,10 @@ final class Session
                 return;
             }
             $this->vterm->write($chunk);
+            $responses = $this->vterm->takeResponses();
+            if ($responses !== '') {
+                $this->pty->write($responses);
+            }
         }
     }
 

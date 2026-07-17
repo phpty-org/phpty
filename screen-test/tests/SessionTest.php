@@ -71,6 +71,33 @@ final class SessionTest extends TestCase
         $this->assertStringContainsString('xy', $session->render()[0]);
     }
 
+    public function testWritesQueryRepliesBackToTheSubject(): void
+    {
+        $bash = $this->findBash();
+        if ($bash === null) {
+            $this->markTestSkipped('This test needs bash for a Subject that queries the terminal.');
+        }
+
+        // The Subject asks for the cursor position and blocks until it receives
+        // the reply, only then printing. If the reply were not written back, it
+        // would hang and print nothing.
+        $session = $this->start(3, 30, [$bash, '-c', 'printf "\033[6n"; IFS= read -r -d R _; printf DONE']);
+        $session->sync();
+
+        $this->assertStringContainsString('DONE', \implode('', $session->render()));
+    }
+
+    private function findBash(): ?string
+    {
+        foreach (['/bin/bash', '/usr/bin/bash', '/usr/local/bin/bash'] as $path) {
+            if (\is_executable($path)) {
+                return $path;
+            }
+        }
+
+        return null;
+    }
+
     /**
      * @param list<string> $command
      */
