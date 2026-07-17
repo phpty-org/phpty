@@ -63,6 +63,11 @@ has no 7.4 ([ADR-0008](./0008-nix-flake-for-dev-and-ci.md)), so this one CI leg
 uses `shivammathur/setup-php` at 7.4 with FFI. Two environment systems, with
 clean roles: the flake is development truth, setup-php is the ship inspection.
 
+The two do not stay wholly apart even here. setup-php supplies the 7.4 runtime,
+but libghostty-vt still comes from nix — `nix build .#libghostty-vt` yields the
+exact pinned shared object, which the 7.4 PHP then dlopens. The PHP version and
+the native library are pinned by different tools, and both are pinned.
+
 ## Consequences
 
 - **Modules must be written to survive downgrade.** Rector's 7.4 set handles
