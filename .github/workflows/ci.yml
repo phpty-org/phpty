@@ -59,3 +59,67 @@ jobs:
             }
             echo "libghostty-vt width table matches the ADRs\n";
           '
+
+  module-deps:
+    name: prefer-lowest / ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [vterm, pty, screen-test]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Each module is a standalone package; this checks it validates and resolves
+      # at the LOWEST versions of its dependencies. Keeping the test tools in
+      # isolated bin packages (ADR-0010) is what keeps this resolution a clean
+      # measurement of the library, not of PHPUnit's tree.
+      #
+      # Sibling modules are not on Packagist yet (publication is deferred), so they
+      # are linked by path. Every module sits on the same untagged branch, so
+      # `self.version` resolves them all to dev-main — no branch alias needed. The
+      # path repos are injected here only, never in the shipped composer.json.
+      - name: validate and resolve at floor (${{ matrix.module }})
+        run: |
+          nix develop .#default --command bash -c '
+            set -e
+            cd ${{ matrix.module }}
+            composer validate --strict --no-check-publish --no-check-lock
+            for sib in vterm pty screen-test; do
+              [ "$sib" = "${{ matrix.module }}" ] && continue
+              composer config repositories."$sib" path ../"$sib"
+            done
+            composer update --prefer-lowest --prefer-stable
+          '
+
+  downgrade:
+    name: downgrade to PHP 7.4 applies cleanly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Guards the release downgrade config (ADR-0009): the modern source must stay
+      # lowerable to 7.4 without Rector erroring — this is what would have caught
+      # the MHASH_XXH32 rule crash. It applies the downgrade to the ephemeral
+      # checkout; the real 7.4 *runtime* test happens at release, on setup-php.
+      - name: rector downgrade applies without error
+        run: |
+          nix develop .#default --command bash -c '
+            set -e
+            composer bin rector install
+            vendor-bin/rector/vendor/bin/rector process --config build/rector-downgrade.php --no-progress-bar
+          '

@@ -1,5 +1,10 @@
 /vendor/
+/*/vendor/
 /vendor-bin/*/vendor/
+
+# Composer: module lock files are never committed (libraries pin nothing),
+# and CI generates them transiently during per-module --prefer-lowest checks.
+/*/composer.lock
 
 # PHPUnit
 /phpunit.xml

@@ -42,6 +42,18 @@ monorepo tag becomes the same tag in every split repo. This is Symfony's model,
 and it is the right default until a module actually stabilises ahead of the
 others.
 
+## Resolving sibling modules before they are published
+
+A module like ScreenTest requires its siblings by `self.version`, but they are not
+on Packagist while publication is deferred, so a standalone `composer update` on
+it cannot resolve them. Development and CI link siblings by path repository
+instead. This needs no branch alias: every module sits on the same untagged
+branch, so each resolves to `dev-main`, and `self.version` matches across all of
+them. The path repositories are injected only where a standalone resolution is
+performed — the CI `prefer-lowest` check — and never enter a shipped
+`composer.json`. Verified: with path repos injected, ScreenTest resolves
+`phpty/pty` and `phpty/vterm` at `dev-main` and installs them by symlink.
+
 ## Why PHP 7.4 validation runs outside the flake
 
 The project's own rule is to render before believing — so shipping 7.4 code that
