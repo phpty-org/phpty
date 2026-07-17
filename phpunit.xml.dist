@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Kept deliberately minimal so one config is valid across PHPUnit 9, 11, and 12 —
+  the span a PHP 7.4-through-8.5 library must run on. See
+  docs/adr/0010-testing-spans-74-to-85-via-polyfills.md.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         bootstrap="tests/bootstrap.php"
+         colors="true"
+         failOnWarning="true">
+    <testsuites>
+        <testsuite name="phpty">
+            <directory>vterm/tests</directory>
+            <directory>pty/tests</directory>
+            <directory>screen-test/tests</directory>
+        </testsuite>
+    </testsuites>
+</phpunit>
