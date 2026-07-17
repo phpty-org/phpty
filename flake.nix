@@ -12,6 +12,14 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
     in
     {
+      # Re-export the pinned libghostty-vt so `nix build .#libghostty-vt` yields the
+      # exact shared object the devShell uses. The release pipeline's PHP 7.4
+      # validation leg runs on setup-php (no nix PHP) yet still must dlopen this
+      # library; flake.lock pins its version so dev and that leg agree.
+      packages = forAllSystems (system: {
+        libghostty-vt = ghostty.packages.${system}.libghostty-vt;
+      });
+
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -44,8 +52,9 @@
           };
         in
         {
-          # ADR-0003: the first-milestone modules target modern PHP. nixpkgs has
-          # no 7.4 or 8.0; see ADR-0008 for why that is not yet a problem.
+          # ADR-0003: modules are developed on modern PHP and shipped as 7.4.
+          # nixpkgs has no 7.4/8.0; the shipped floor is validated at release on
+          # setup-php (ADR-0008, ADR-0009).
           default = mkShell (withFfi pkgs.php84);
           php81 = mkShell (withFfi pkgs.php81);
           php82 = mkShell (withFfi pkgs.php82);
