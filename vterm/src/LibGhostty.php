@@ -1,0 +1,76 @@
+<?php
+
+declare(strict_types=1);
+
+namespace PhPty\VTerm;
+
+use FFI;
+
+/**
+ * Loads libghostty-vt and declares the slice of its C ABI that VTerm uses.
+ *
+ * The declarations are transcribed from the pinned headers (ghostty/vt/*.h).
+ * Only what VTerm needs is declared; the surface grows as VTerm does. See
+ * docs/adr/0002-vterm-binds-libghostty-vt.md.
+ */
+final class LibGhostty
+{
+    private const CDEF = <<<'C'
+        typedef void *GhosttyTerminal;
+        typedef int GhosttyResult;
+        typedef int GhosttyPointTag;
+
+        typedef struct {
+            uint16_t cols;
+            uint16_t rows;
+            size_t max_scrollback;
+        } GhosttyTerminalOptions;
+
+        typedef struct {
+            uint16_t x;
+            uint32_t y;
+        } GhosttyPointCoordinate;
+
+        typedef union {
+            GhosttyPointCoordinate coordinate;
+            uint64_t _padding[2];
+        } GhosttyPointValue;
+
+        typedef struct {
+            GhosttyPointTag tag;
+            GhosttyPointValue value;
+        } GhosttyPoint;
+
+        typedef struct {
+            size_t size;
+            void *node;
+            uint16_t x;
+            uint16_t y;
+        } GhosttyGridRef;
+
+        GhosttyResult ghostty_terminal_new(const void *allocator, GhosttyTerminal *terminal, GhosttyTerminalOptions options);
+        void ghostty_terminal_free(GhosttyTerminal terminal);
+        void ghostty_terminal_vt_write(GhosttyTerminal terminal, const uint8_t *data, size_t len);
+        GhosttyResult ghostty_terminal_grid_ref(GhosttyTerminal terminal, GhosttyPoint point, GhosttyGridRef *out_ref);
+        GhosttyResult ghostty_grid_ref_graphemes(const GhosttyGridRef *ref, uint32_t *buf, size_t buf_len, size_t *out_len);
+        C;
+
+    public static function load(?string $libraryDir = null): FFI
+    {
+        $libraryDir = $libraryDir ?? (getenv('PHPTY_LIBGHOSTTY_VT') ?: null);
+        if ($libraryDir === null) {
+            throw new \RuntimeException(
+                'libghostty-vt not found: set PHPTY_LIBGHOSTTY_VT to the directory containing it '
+                . '(the Nix dev shell sets this automatically).'
+            );
+        }
+
+        $extension = PHP_OS_FAMILY === 'Darwin' ? 'dylib' : 'so';
+        $path = $libraryDir . '/libghostty-vt.' . $extension;
+        if (!is_file($path)) {
+            throw new \RuntimeException("libghostty-vt shared object not found at {$path}.");
+        }
+
+        return FFI::cdef(self::CDEF, $path);
+    }
+}

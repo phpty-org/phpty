@@ -5,7 +5,8 @@
     "keywords": ["terminal", "vt", "emulator", "ffi", "libghostty"],
     "require": {
         "php": "^7.4 || ^8.0",
-        "ext-ffi": "*"
+        "ext-ffi": "*",
+        "ext-mbstring": "*"
     },
     "autoload": {
         "psr-4": {
