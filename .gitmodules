@@ -1,0 +1,12 @@
+[submodule "references/yamatanooroti"]
+	path = references/yamatanooroti
+	url = https://github.com/aycabta/yamatanooroti.git
+[submodule "references/vterm-gem"]
+	path = references/vterm-gem
+	url = https://github.com/aycabta/vterm-gem.git
+[submodule "references/reline"]
+	path = references/reline
+	url = https://github.com/ruby/reline.git
+[submodule "references/psysh"]
+	path = references/psysh
+	url = https://github.com/bobthecow/psysh.git
