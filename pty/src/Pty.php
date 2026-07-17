@@ -24,6 +24,7 @@ final class Pty
     private int $controller;
     private int $pid;
     private bool $closed = false;
+    private bool $exited = false;
 
     private function __construct(FFI $libc, int $controller, int $pid)
     {
@@ -68,6 +69,11 @@ final class Pty
         }
 
         $libc->close($deviceFd);
+
+        // Read the Controller without blocking, so a Sync can drain what is
+        // available and stop rather than wait for output that may never come.
+        $flags = $libc->fcntl($controllerFd, Libc::F_GETFL, 0);
+        $libc->fcntl($controllerFd, Libc::F_SETFL, $flags | Libc::O_NONBLOCK);
 
         return new self($libc, $controllerFd, $pid);
     }
@@ -115,6 +121,22 @@ final class Pty
         return $this->pid;
     }
 
+    /** Whether the child is still running. Reaps it if it has just exited. */
+    public function isRunning(): bool
+    {
+        if ($this->closed || $this->exited) {
+            return false;
+        }
+        $result = \pcntl_waitpid($this->pid, $status, \WNOHANG);
+        if ($result !== 0) {
+            $this->exited = true;
+
+            return false;
+        }
+
+        return true;
+    }
+
     /** Write bytes to the Controller — the child sees them on its stdin. */
     public function write(string $bytes): int
     {
@@ -155,7 +177,10 @@ final class Pty
         }
         $this->closed = true;
         $this->libc->close($this->controller);
-        if (\function_exists('pcntl_waitpid')) {
+        if (!$this->exited) {
+            // Kill first, then reap: a still-running Subject (e.g. one blocked on
+            // input) would otherwise leave waitpid blocking forever.
+            @\posix_kill($this->pid, \SIGKILL);
             \pcntl_waitpid($this->pid, $status);
         }
     }

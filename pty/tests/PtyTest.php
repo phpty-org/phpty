@@ -81,14 +81,27 @@ final class PtyTest extends TestCase
         $pty->read();
     }
 
-    /** Read until the child closes the Device (EOF on macOS, EIO on Linux). */
+    /**
+     * Poll the non-blocking Controller until the child has exited and its output
+     * is drained.
+     */
     private function readToEnd(Pty $pty): string
     {
         $output = '';
-        while (($chunk = $pty->read()) !== '') {
-            $output .= $chunk;
-        }
+        while (true) {
+            $chunk = $pty->read();
+            if ($chunk !== '') {
+                $output .= $chunk;
+                continue;
+            }
+            if (!$pty->isRunning()) {
+                while (($chunk = $pty->read()) !== '') {
+                    $output .= $chunk;
+                }
 
-        return $output;
+                return $output;
+            }
+            \usleep(2000);
+        }
     }
 }

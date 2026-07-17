@@ -20,10 +20,22 @@ final class Libc
     /** ioctl request to make a Tty the calling session's controlling terminal. */
     public const TIOCSCTTY = PHP_OS_FAMILY === 'Darwin' ? 0x20007461 : 0x540E;
 
+    /** fcntl commands to get and set a file descriptor's status flags. */
+    public const F_GETFL = 3;
+    public const F_SETFL = 4;
+
+    /** O_NONBLOCK, whose value differs between the platforms. */
+    public const O_NONBLOCK = PHP_OS_FAMILY === 'Darwin' ? 0x0004 : 0x800;
+
+    // fcntl and ioctl are variadic in C. They must be declared with `...` and not
+    // a fixed third parameter: on arm64 a fixed and a variadic argument use
+    // different registers, so a fixed declaration passes the third argument where
+    // the function does not look for it — silently setting the wrong flags.
     private const CDEF = <<<'C'
         int openpty(int *amaster, int *aslave, char *name, const void *termp, const void *winp);
         int dup2(int oldfd, int newfd);
-        int ioctl(int fd, unsigned long request, int arg);
+        int fcntl(int fd, int cmd, ...);
+        int ioctl(int fd, unsigned long request, ...);
         long read(int fd, void *buf, unsigned long count);
         long write(int fd, const void *buf, unsigned long count);
         int close(int fd);
