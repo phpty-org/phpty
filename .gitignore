@@ -1,0 +1,12 @@
+/vendor/
+/vendor-bin/*/vendor/
+
+# PHPUnit
+/phpunit.xml
+.phpunit.result.cache
+.phpunit.cache/
+
+# Nix
+/result
+/result-*
+.direnv/
