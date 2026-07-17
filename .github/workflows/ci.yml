@@ -60,6 +60,19 @@ jobs:
             echo "libghostty-vt width table matches the ADRs\n";
           '
 
+      # Run the real suite on every matrix PHP. This exercises the FFI binding
+      # against libghostty on each version, and the PHPUnit-Polyfills span
+      # (ADR-0010): the pinned bin lock is PHPUnit 12 (8.3+), so re-resolve per
+      # PHP — 8.1 gets 9, 8.4 gets 12 — and let the polyfills bridge them.
+      - name: test suite
+        run: |
+          nix develop .#${{ matrix.php }} --command bash -c '
+            set -e
+            composer install --no-interaction
+            composer bin phpunit update --no-interaction --no-audit
+            vendor-bin/phpunit/vendor/bin/phpunit
+          '
+
   module-deps:
     name: prefer-lowest / ${{ matrix.module }}
     runs-on: ubuntu-latest
