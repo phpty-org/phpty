@@ -78,6 +78,19 @@ final class VTermTest extends TestCase
         $vterm->cellAt(0, 4);
     }
 
+    public function testAnswersACursorPositionQuery(): void
+    {
+        $vterm = new VTerm(3, 20);
+        $this->assertSame('', $vterm->takeResponses());
+
+        // DSR: report cursor position. The reply is a CPR: ESC [ row ; col R,
+        // 1-based, so top-left is "1;1".
+        $vterm->write("\x1b[6n");
+
+        $this->assertSame("\x1b[1;1R", $vterm->takeResponses());
+        $this->assertSame('', $vterm->takeResponses(), 'responses are cleared once taken');
+    }
+
     public function testCarriageReturnAndOverwrite(): void
     {
         $vterm = new VTerm(1, 5);

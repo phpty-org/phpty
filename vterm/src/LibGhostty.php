@@ -51,8 +51,11 @@ final class LibGhostty
         typedef uint64_t GhosttyCell;
         typedef int GhosttyCellData;
         typedef int GhosttyCellWide;
+        typedef int GhosttyTerminalOption;
+        typedef void (*GhosttyTerminalWritePtyFn)(GhosttyTerminal terminal, void *userdata, const uint8_t *data, size_t len);
 
         GhosttyResult ghostty_terminal_new(const void *allocator, GhosttyTerminal *terminal, GhosttyTerminalOptions options);
+        GhosttyResult ghostty_terminal_set(GhosttyTerminal terminal, GhosttyTerminalOption option, GhosttyTerminalWritePtyFn value);
         void ghostty_terminal_free(GhosttyTerminal terminal);
         void ghostty_terminal_vt_write(GhosttyTerminal terminal, const uint8_t *data, size_t len);
         GhosttyResult ghostty_terminal_grid_ref(GhosttyTerminal terminal, GhosttyPoint point, GhosttyGridRef *out_ref);

@@ -22,10 +22,19 @@ final class VTerm
     /** GHOSTTY_CELL_DATA_WIDE: query a cell's width behaviour. */
     private const CELL_DATA_WIDE = 3;
 
+    /** GHOSTTY_TERMINAL_OPT_WRITE_PTY: install the query-response callback. */
+    private const OPT_WRITE_PTY = 1;
+
     private FFI $ffi;
 
     /** @var FFI\CData GhosttyTerminal handle */
     private $terminal;
+
+    /** Bytes the terminal wants sent back upstream (replies to queries). */
+    private string $responses = '';
+
+    /** @var callable Held so the FFI callback is not garbage-collected. */
+    private $writePty;
 
     public function __construct(
         private readonly int $rows,
@@ -48,6 +57,14 @@ final class VTerm
             throw new \RuntimeException("ghostty_terminal_new failed with result {$result}.");
         }
         $this->terminal = $terminal;
+
+        // Collect the terminal's replies to queries (a cursor-position report,
+        // for one) so a driver can send them back to the program. Without this,
+        // libghostty ignores such sequences and a program awaiting a reply hangs.
+        $this->writePty = function ($terminal, $userdata, $data, $length): void {
+            $this->responses .= FFI::string($data, $length);
+        };
+        $this->ffi->ghostty_terminal_set($this->terminal, self::OPT_WRITE_PTY, $this->writePty);
     }
 
     public function rows(): int
@@ -73,6 +90,19 @@ final class VTerm
         $buffer = $this->ffi->new("uint8_t[{$length}]");
         FFI::memcpy($buffer, $bytes, $length);
         $this->ffi->ghostty_terminal_vt_write($this->terminal, $buffer, $length);
+    }
+
+    /**
+     * Take the bytes the terminal wants to send back upstream — replies to
+     * queries in what was written — and clear them. The direction is the
+     * reverse of write(): these go towards the program, not the Screen.
+     */
+    public function takeResponses(): string
+    {
+        $responses = $this->responses;
+        $this->responses = '';
+
+        return $responses;
     }
 
     /**
