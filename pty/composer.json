@@ -5,7 +5,9 @@
     "keywords": ["pty", "pseudo-terminal", "openpty", "ffi", "process"],
     "require": {
         "php": "^7.4 || ^8.0",
-        "ext-ffi": "*"
+        "ext-ffi": "*",
+        "ext-pcntl": "*",
+        "ext-posix": "*"
     },
     "autoload": {
         "psr-4": {
