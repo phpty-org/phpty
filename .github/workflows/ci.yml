@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# ADR-0008: CI uses the same flake as the devShell. There is deliberately no
+# setup-php here — two definitions would drift, and they would drift on the
+# libghostty-vt commit.
+jobs:
+  devshell:
+    name: ${{ matrix.php }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # ADR-0003: the first-milestone modules target modern PHP.
+        # ADR-0008: nixpkgs has no 7.4 or 8.0, which does not bite yet.
+        php: [php81, php82, php83, php84, php85]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # No binary cache is configured yet, so every job builds libghostty-vt from
+      # source. ADR-0008 accepts this cost; it is the first thing to fix if CI
+      # becomes painful.
+      - name: PHP has FFI
+        run: |
+          nix develop .#${{ matrix.php }} --command php -r '
+            if (!extension_loaded("FFI")) { fwrite(STDERR, "FFI missing\n"); exit(1); }
+            echo "PHP ", PHP_VERSION, " with FFI\n";
+          '
+
+      # The ADR-0002 claim, checked on every push: PHP can dlopen libghostty-vt,
+      # and it measures width the way the ADRs say it does. If this fails, the
+      # pinned libghostty-vt moved under us.
+      - name: PHP can call libghostty-vt over FFI
+        run: |
+          nix develop .#${{ matrix.php }} --command php -r '
+            $ext = PHP_OS_FAMILY === "Darwin" ? "dylib" : "so";
+            $ffi = FFI::cdef(
+              "uint8_t ghostty_unicode_codepoint_width(uint32_t cp);",
+              getenv("PHPTY_LIBGHOSTTY_VT") . "/libghostty-vt." . $ext
+            );
+            $expected = [0x0061 => 1, 0x65E5 => 2, 0x3042 => 2, 0xFF21 => 2, 0x2192 => 1];
+            foreach ($expected as $cp => $want) {
+              $got = $ffi->ghostty_unicode_codepoint_width($cp);
+              if ($got !== $want) {
+                fwrite(STDERR, sprintf("U+%04X: expected %d, got %d\n", $cp, $want, $got));
+                exit(1);
+              }
+            }
+            echo "libghostty-vt width table matches the ADRs\n";
+          '
