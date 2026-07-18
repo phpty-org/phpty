@@ -2,10 +2,14 @@ name: CI
 
 on:
   push:
-    # Release tags point at a commit already built on its branch push, and the
-    # Release workflow does its own real-7.4 verify before tagging — so a
-    # tag push would only duplicate a green run. Branch pushes still trigger.
-    tags-ignore: ['**']
+    # All branches, no tags. Listing only `branches` is what excludes tags:
+    # per Actions semantics, defining only one of branches/tags means the
+    # other kind of ref never triggers. (`tags-ignore: ['**']` alone looks
+    # equivalent but silently disables BRANCH builds — the same rule read the
+    # other way — and did exactly that for a day.) Release tags point at a
+    # commit already built on its branch push, and the Release workflow does
+    # its own real-7.4 verify before tagging, so tag builds are pure waste.
+    branches: ['**']
   pull_request:
 
 # Hybrid CI (ADR-0013): PHP comes from setup-php — fast, and every version
