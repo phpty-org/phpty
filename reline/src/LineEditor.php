@@ -229,6 +229,86 @@ final class LineEditor
      */
     private ?string $last_incremental_search = null;
 
+    // --- Vi mode (tier 5) --------------------------------------------------
+
+    /**
+     * The numeric argument being accumulated in vi_command mode (line_editor.rb:
+     * 232). Null when no count is pending; ed_argument_digit builds it up and
+     * run_for_operators consumes and clears it after the next command.
+     */
+    private ?int $vi_arg = null;
+
+    /**
+     * The pending vi operator awaiting a motion — one of vi_change_meta_confirm /
+     * vi_delete_meta_confirm / vi_yank_confirm, or null (line_editor.rb:234). The
+     * motion runs first, then run_for_operators dispatches this over the byte range
+     * the motion covered.
+     *
+     * @var string|null
+     */
+    private ?string $vi_waiting_operator = null;
+
+    /** The count multiplied into the operator's motion (line_editor.rb:235). */
+    private ?int $vi_waiting_operator_arg = null;
+
+    /**
+     * Set by vi_change_meta so vi_next_word drops trailing spaces from the change
+     * range (line_editor.rb:245,2068) — `cw` behaves like `ce`, unlike `dw`.
+     */
+    private bool $drop_terminate_spaces = false;
+
+    /** The vi yank/delete clipboard, pasted by p / P (line_editor.rb:231). */
+    private string $vi_clipboard = '';
+
+    /**
+     * The emacs mark [line_index, cursor_column], or null (line_editor.rb:226).
+     * Set by C-@ / M-space; not exercised by vi, kept for reset-shape parity.
+     *
+     * @var array{0: int, 1: int}|null
+     */
+    private ?array $mark_position = null;
+
+    /**
+     * The injectable `$EDITOR` invocation for vi_histedit (`v` in vi_command).
+     * Given the temp-file path, it runs an editor over it; null uses the default
+     * `$EDITOR path` spawn. Tests set this to edit the file in-process, so the
+     * histedit structure is exercised without a real editor (its ScreenTest is
+     * skipped, per the tier brief).
+     *
+     * @var (callable(string): void)|null
+     */
+    private $vi_histedit_invocation = null;
+
+    /**
+     * Motion commands a vi operator (d/c/y) may compose with (line_editor.rb:18).
+     * When one of these follows a pending operator, the operator applies over the
+     * byte range the motion covered.
+     */
+    private const VI_MOTIONS = [
+        'ed_prev_char',
+        'ed_next_char',
+        'vi_zero',
+        'ed_move_to_beg',
+        'ed_move_to_end',
+        'vi_to_column',
+        'vi_next_char',
+        'vi_prev_char',
+        'vi_next_word',
+        'vi_prev_word',
+        'vi_to_next_char',
+        'vi_to_prev_char',
+        'vi_end_word',
+        'vi_next_big_word',
+        'vi_prev_big_word',
+        'vi_end_big_word',
+    ];
+
+    /** Commands that accumulate the numeric argument (line_editor.rb:994). */
+    private const ARGUMENT_DIGIT_METHODS = ['ed_digit', 'vi_zero', 'ed_argument_digit'];
+
+    /** Keys that do not cancel a pending vi operator (line_editor.rb:995). */
+    private const VI_WAITING_ACCEPT_METHODS = ['vi_change_meta', 'vi_delete_meta', 'vi_yank', 'ed_insert', 'ed_argument_digit'];
+
     public function __construct(?Config $config, IO $io, ?History $history = null)
     {
         $this->config = $config;
@@ -274,10 +354,16 @@ final class LineEditor
     public function reset_variables(string $prompt = ''): void
     {
         $this->prompt = \str_replace("\n", '\\n', $prompt);
+        $this->mark_position = null;
         $this->is_multiline = false;
         $this->finished = false;
         $this->history_pointer = null;
+        $this->vi_clipboard = '';
+        $this->vi_arg = null;
         $this->waiting_proc = null;
+        $this->vi_waiting_operator = null;
+        $this->vi_waiting_operator_arg = null;
+        $this->drop_terminate_spaces = false;
         $this->searching_prompt = null;
         $this->just_cursor_moving = false;
         $this->eof = false;
@@ -325,6 +411,12 @@ final class LineEditor
     public function set_confirm_multiline_termination_proc(?callable $proc): void
     {
         $this->confirm_multiline_termination_proc = $proc;
+    }
+
+    /** The injectable vi_histedit `$EDITOR` invocation (test/embedding seam). */
+    public function set_vi_histedit_invocation(?callable $proc): void
+    {
+        $this->vi_histedit_invocation = $proc;
     }
 
     /** @param (callable(list<string>): list<string>)|null $proc */
@@ -574,6 +666,14 @@ final class LineEditor
 
         $this->process_key($key->char, $key->method_symbol);
 
+        // In vi_command mode the cursor never rests past the last character
+        // (line_editor.rb:1034): after a command lands it at end-of-line, step it
+        // back onto the final grapheme.
+        if ($this->config !== null && $this->config->editing_mode_is('vi_command') && $this->byte_pointer > 0 && $this->byte_pointer === \strlen($this->current_line())) {
+            $byteSize = Unicode::get_prev_mbchar_size($this->buffer_of_lines[$this->line_index], $this->byte_pointer);
+            $this->byte_pointer -= $byteSize;
+        }
+
         $this->prev_action_state = $this->next_action_state;
         $this->next_action_state = [];
 
@@ -611,10 +711,16 @@ final class LineEditor
      */
     private function process_key(string $key, $method_symbol): void
     {
-        // A waiting proc (incremental search) consumes multi-character keys as a
-        // signal to stop waiting (line_editor.rb:998); the vi_waiting_operator
-        // branch is tier 5 and absent.
+        // A waiting proc (incremental search, vi f/F/t/T/r) consumes multi-char
+        // keys as a signal to stop waiting (line_editor.rb:998).
         if ($this->waiting_proc !== null && \mb_strlen($key, 'UTF-8') !== 1) {
+            $this->cleanup_waiting();
+        }
+        // A pending vi operator is cancelled unless the next command accepts it or
+        // is a motion (line_editor.rb:1001) — `dc`, `dy`, a csi arrow after `d`, etc.
+        if ($this->vi_waiting_operator !== null
+            && !\in_array($method_symbol, self::VI_WAITING_ACCEPT_METHODS, true)
+            && !\in_array($method_symbol, self::VI_MOTIONS, true)) {
             $this->cleanup_waiting();
         }
         $this->process_insert($method_symbol !== 'ed_insert');
@@ -623,10 +729,13 @@ final class LineEditor
 
     private function cleanup_waiting(): void
     {
-        // The vi_waiting_operator / drop_terminate_spaces state (line_editor.rb:986)
-        // is tier 5; only the search-mode fields are live here.
+        // Drops both the search/replace waiting proc and any pending vi operator
+        // (line_editor.rb:986).
         $this->waiting_proc = null;
+        $this->vi_waiting_operator = null;
+        $this->vi_waiting_operator_arg = null;
         $this->searching_prompt = null;
+        $this->drop_terminate_spaces = false;
     }
 
     /**
@@ -634,10 +743,44 @@ final class LineEditor
      */
     private function run_for_operators(string $key, $method_symbol): void
     {
-        // Upstream branches here on numeric-argument and vi-operator state
-        // (line_editor.rb:921-951); both are vi-only and absent in tier 1, so
-        // every emacs command takes the same plain dispatch path.
-        $this->wrap_method_call($method_symbol, $key, false);
+        // Multibyte input reaches vi_command mode as ed_insert; reject it there so
+        // stray bytes don't type into a command buffer (line_editor.rb:922).
+        if ($method_symbol === 'ed_insert' && $this->config !== null && $this->config->editing_mode_is('vi_command') && $this->waiting_proc === null) {
+            return;
+        }
+
+        // A numeric-argument command bypasses the operator machinery — it only
+        // grows @vi_arg (line_editor.rb:925).
+        if (\in_array($method_symbol, self::ARGUMENT_DIGIT_METHODS, true) && $this->waiting_proc === null) {
+            $this->wrap_method_call($method_symbol, $key, false);
+
+            return;
+        }
+
+        if ($this->vi_waiting_operator !== null) {
+            if ($this->waiting_proc !== null || \in_array($method_symbol, self::VI_MOTIONS, true)) {
+                $old_byte_pointer = $this->byte_pointer;
+                $this->vi_arg = ($this->vi_arg ?? 1) * ($this->vi_waiting_operator_arg ?? 1);
+                $this->wrap_method_call($method_symbol, $key, true);
+                // A motion that installs its own waiting proc (f/F/t/T) defers the
+                // operator until its follow-up key resolves the range.
+                if ($this->waiting_proc === null) {
+                    $byte_pointer_diff = $this->byte_pointer - $old_byte_pointer;
+                    $this->byte_pointer = $old_byte_pointer;
+                    $operator = $this->vi_waiting_operator;
+                    $this->{$operator}($byte_pointer_diff);
+                    $this->cleanup_waiting();
+                }
+            } else {
+                // A non-motion cancels the operator (already handled in process_key,
+                // but mirror upstream's belt-and-braces path).
+                $this->wrap_method_call($method_symbol, $key, false);
+                $this->cleanup_waiting();
+            }
+        } else {
+            $this->wrap_method_call($method_symbol, $key, false);
+        }
+        $this->vi_arg = null;
         $this->kill_ring->process();
     }
 
@@ -646,22 +789,62 @@ final class LineEditor
      */
     public function wrap_method_call($method_symbol, string $key, bool $with_operator): void
     {
-        // While a search is running the key is fed to the waiting proc rather than
-        // dispatched (line_editor.rb:964).
+        // While a proc is waiting the key is fed to it rather than dispatched
+        // (line_editor.rb:964) — incremental search and vi f/F/t/T/r.
         if ($this->waiting_proc !== null) {
             ($this->waiting_proc)($key, $method_symbol);
 
             return;
         }
-        // Unknown / unbound methods (vi commands absent until tier 5) no-op here,
+        // Unknown / unimplemented commands (vi_alias, vi_comment_out) no-op here,
         // mirroring upstream's `return unless respond_to?`. This is the
         // ed_unassigned-equivalent: dispatch simply does nothing.
         if (!\is_string($method_symbol) || !\method_exists($this, $method_symbol)) {
             return;
         }
-        // Tier 1 is emacs-only: @vi_arg is always nil and no motion is inclusive,
-        // so wrap_method_call reduces to a plain single-argument call.
-        $this->{$method_symbol}($key);
+        // Build the call the way upstream reflects on the method's keyword params
+        // (line_editor.rb:970-983): pass @vi_arg to an `arg:`-taking method, and
+        // the operator flag to an `inclusive:`-taking motion.
+        [$argumentable, $inclusive] = $this->method_arg_shape($method_symbol);
+        if ($this->vi_arg !== null && $argumentable) {
+            if ($inclusive) {
+                $this->{$method_symbol}($key, $this->vi_arg, $with_operator);
+            } else {
+                $this->{$method_symbol}($key, $this->vi_arg);
+            }
+        } elseif ($inclusive) {
+            $this->{$method_symbol}($key, 1, $with_operator);
+        } else {
+            $this->{$method_symbol}($key);
+        }
+    }
+
+    /**
+     * The (argumentable, inclusive) shape of a command, from its parameter names —
+     * upstream's `argumentable?` / `inclusive?` (line_editor.rb:953-961). A method
+     * is argumentable if it declares an `$arg` parameter and inclusive if it
+     * declares an `$inclusive` one. Cached per method name.
+     *
+     * @return array{0: bool, 1: bool}
+     */
+    private function method_arg_shape(string $method_symbol): array
+    {
+        static $cache = [];
+        if (isset($cache[$method_symbol])) {
+            return $cache[$method_symbol];
+        }
+        $argumentable = false;
+        $inclusive = false;
+        foreach ((new \ReflectionMethod($this, $method_symbol))->getParameters() as $param) {
+            if ($param->getName() === 'arg') {
+                $argumentable = true;
+            }
+            if ($param->getName() === 'inclusive') {
+                $inclusive = true;
+            }
+        }
+
+        return $cache[$method_symbol] = [$argumentable, $inclusive];
     }
 
     private function push_undo_redo(bool $modified): void
@@ -1429,6 +1612,651 @@ final class LineEditor
         $this->vi_search_next($key);
     }
 
+    /**
+     * Scan a range of history pointers for the first line whose text starts with
+     * $prefix, ported from line_editor.rb:1567. $pointers is already ordered by the
+     * caller (reversed for backward search). Returns [pointer, line_index] or null.
+     *
+     * @param list<int> $pointers
+     * @return array{0: int, 1: int}|null
+     */
+    private function search_history(string $prefix, array $pointers): ?array
+    {
+        foreach ($pointers as $pointer) {
+            $lines = \explode("\n", (string) $this->history[$pointer]);
+            foreach ($lines as $index => $line) {
+                if ($prefix === '' || \strncmp($line, $prefix, \strlen($prefix)) === 0) {
+                    return [$pointer, $index];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Prefix history search backward (history-search-backward), ported from
+     * line_editor.rb:1577. The 0.6.3 emacs and vi keymaps bind no key to this
+     * (upstream's own tests note "doesn't have default binding" and reach it via
+     * __send__); it is ported here — with its search_history helper — to close the
+     * tier-3 deferral, and exercised by symbol as upstream does.
+     */
+    private function ed_search_prev_history(string $key, int $arg = 1): void
+    {
+        $substr = $this->prev_action_state_value('search_history') === 'empty'
+            ? ''
+            : \substr($this->current_line(), 0, $this->byte_pointer);
+        if ($this->history_pointer === 0) {
+            return;
+        }
+        if ($this->history_pointer === null && $substr === '' && $this->current_line() !== '') {
+            return;
+        }
+        $base = $this->history_pointer ?? $this->history->size();
+        $pointers = \range($base - 1, 0); // reverse_each of 0...base
+        if ($base - 1 < 0) {
+            $pointers = [];
+        }
+        $hit = $this->search_history($substr, $pointers);
+        if ($hit === null) {
+            return;
+        }
+        [$h_pointer, $line_index] = $hit;
+        $this->move_history($h_pointer, $line_index, $substr === '' ? 'end' : $this->byte_pointer);
+        $arg -= 1;
+        if ($substr === '') {
+            $this->set_next_action_state('search_history', 'empty');
+        }
+        if ($arg > 0) {
+            $this->ed_search_prev_history($key, $arg);
+        }
+    }
+
+    private function history_search_backward(string $key, int $arg = 1): void
+    {
+        $this->ed_search_prev_history($key, $arg);
+    }
+
+    /** Prefix history search forward (history-search-forward), line_editor.rb:1592. Unbound; see ed_search_prev_history. */
+    private function ed_search_next_history(string $key, int $arg = 1): void
+    {
+        $substr = $this->prev_action_state_value('search_history') === 'empty'
+            ? ''
+            : \substr($this->current_line(), 0, $this->byte_pointer);
+        if ($this->history_pointer === null) {
+            return;
+        }
+        $pointers = \range($this->history_pointer + 1, $this->history->size() - 1);
+        if ($this->history_pointer + 1 > $this->history->size() - 1) {
+            $pointers = [];
+        }
+        $hit = $this->search_history($substr, $pointers);
+        if ($hit === null && $substr !== '') {
+            return;
+        }
+        [$h_pointer, $line_index] = $hit ?? [null, 'start'];
+        $this->move_history($h_pointer, $hit === null ? 'start' : $line_index, $substr === '' ? 'end' : $this->byte_pointer);
+        $arg -= 1;
+        if ($substr === '') {
+            $this->set_next_action_state('search_history', 'empty');
+        }
+        if ($arg > 0) {
+            $this->ed_search_next_history($key, $arg);
+        }
+    }
+
+    private function history_search_forward(string $key, int $arg = 1): void
+    {
+        $this->ed_search_next_history($key, $arg);
+    }
+
+    // --- Vi mode commands (line_editor.rb:1429-2352) -----------------------
+
+    /** Guarded editing-mode switch; upstream `@config.editing_mode = :label`. */
+    private function set_editing_mode(string $label): void
+    {
+        if ($this->config !== null) {
+            $this->config->set_editing_mode($label);
+        }
+    }
+
+    /** Store text for a later vi paste, but only in a vi mode (line_editor.rb:1937). */
+    private function copy_for_vi(string $text): void
+    {
+        if ($this->config !== null && $this->config->editing_mode_is('vi_insert', 'vi_command')) {
+            $this->vi_clipboard = $text;
+        }
+    }
+
+    private function vi_first_print(string $key): void
+    {
+        $this->byte_pointer = Unicode::vi_first_print($this->current_line());
+    }
+
+    private function vi_zero(string $key): void
+    {
+        if ($this->vi_arg !== null) {
+            $this->ed_argument_digit($key);
+        } else {
+            $this->ed_move_to_beg($key);
+        }
+    }
+
+    private function ed_argument_digit(string $key): void
+    {
+        // key is expected to be `ESC digit` or `digit`; take the first digit char.
+        $num = \preg_match('/\d/', $key, $m) === 1 ? (int) $m[0] : 0;
+        $this->vi_arg = ($this->vi_arg ?? 0) * 10 + $num;
+    }
+
+    private function vi_insert(string $key): void
+    {
+        $this->set_editing_mode('vi_insert');
+    }
+
+    private function vi_add(string $key): void
+    {
+        $this->set_editing_mode('vi_insert');
+        $this->ed_next_char($key);
+    }
+
+    private function vi_command_mode(string $key): void
+    {
+        $this->ed_prev_char($key);
+        $this->set_editing_mode('vi_command');
+    }
+
+    private function vi_movement_mode(string $key): void
+    {
+        $this->vi_command_mode($key);
+    }
+
+    private function vi_next_word(string $key, int $arg = 1): void
+    {
+        if (\strlen($this->current_line()) > $this->byte_pointer) {
+            $byteSize = Unicode::vi_forward_word($this->current_line(), $this->byte_pointer, $this->drop_terminate_spaces);
+            $this->byte_pointer += $byteSize;
+        }
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->vi_next_word($key, $arg);
+        }
+    }
+
+    private function vi_prev_word(string $key, int $arg = 1): void
+    {
+        if ($this->byte_pointer > 0) {
+            $byteSize = Unicode::vi_backward_word($this->current_line(), $this->byte_pointer);
+            $this->byte_pointer -= $byteSize;
+        }
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->vi_prev_word($key, $arg);
+        }
+    }
+
+    private function vi_end_word(string $key, int $arg = 1, bool $inclusive = false): void
+    {
+        if (\strlen($this->current_line()) > $this->byte_pointer) {
+            $byteSize = Unicode::vi_forward_end_word($this->current_line(), $this->byte_pointer);
+            $this->byte_pointer += $byteSize;
+        }
+        $arg -= 1;
+        if ($inclusive && $arg === 0) {
+            $byteSize = Unicode::get_next_mbchar_size($this->current_line(), $this->byte_pointer);
+            if ($byteSize > 0) {
+                $this->byte_pointer += $byteSize;
+            }
+        }
+        if ($arg > 0) {
+            $this->vi_end_word($key, $arg);
+        }
+    }
+
+    private function vi_next_big_word(string $key, int $arg = 1): void
+    {
+        if (\strlen($this->current_line()) > $this->byte_pointer) {
+            $byteSize = Unicode::vi_big_forward_word($this->current_line(), $this->byte_pointer);
+            $this->byte_pointer += $byteSize;
+        }
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->vi_next_big_word($key, $arg);
+        }
+    }
+
+    private function vi_prev_big_word(string $key, int $arg = 1): void
+    {
+        if ($this->byte_pointer > 0) {
+            $byteSize = Unicode::vi_big_backward_word($this->current_line(), $this->byte_pointer);
+            $this->byte_pointer -= $byteSize;
+        }
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->vi_prev_big_word($key, $arg);
+        }
+    }
+
+    private function vi_end_big_word(string $key, int $arg = 1, bool $inclusive = false): void
+    {
+        if (\strlen($this->current_line()) > $this->byte_pointer) {
+            $byteSize = Unicode::vi_big_forward_end_word($this->current_line(), $this->byte_pointer);
+            $this->byte_pointer += $byteSize;
+        }
+        $arg -= 1;
+        if ($inclusive && $arg === 0) {
+            $byteSize = Unicode::get_next_mbchar_size($this->current_line(), $this->byte_pointer);
+            if ($byteSize > 0) {
+                $this->byte_pointer += $byteSize;
+            }
+        }
+        if ($arg > 0) {
+            $this->vi_end_big_word($key, $arg);
+        }
+    }
+
+    private function vi_delete_prev_char(string $key): void
+    {
+        if ($this->byte_pointer === 0 && $this->line_index > 0) {
+            $this->byte_pointer = \strlen($this->buffer_of_lines[$this->line_index - 1]);
+            $this->buffer_of_lines[$this->line_index - 1] .= \array_splice($this->buffer_of_lines, $this->line_index, 1)[0];
+            $this->line_index -= 1;
+        } elseif ($this->byte_pointer > 0) {
+            $byteSize = Unicode::get_prev_mbchar_size($this->current_line(), $this->byte_pointer);
+            $this->byte_pointer -= $byteSize;
+            [$line] = $this->byteslice($this->current_line(), $this->byte_pointer, $byteSize);
+            $this->set_current_line($line);
+        }
+    }
+
+    private function vi_insert_at_bol(string $key): void
+    {
+        $this->ed_move_to_beg($key);
+        $this->set_editing_mode('vi_insert');
+    }
+
+    private function vi_add_at_eol(string $key): void
+    {
+        $this->ed_move_to_end($key);
+        $this->set_editing_mode('vi_insert');
+    }
+
+    private function ed_delete_prev_char(string $key, int $arg = 1): void
+    {
+        $deleted = '';
+        for ($i = 0; $i < $arg; $i++) {
+            if ($this->byte_pointer > 0) {
+                $byteSize = Unicode::get_prev_mbchar_size($this->current_line(), $this->byte_pointer);
+                $this->byte_pointer -= $byteSize;
+                [$line, $mbchar] = $this->byteslice($this->current_line(), $this->byte_pointer, $byteSize);
+                $this->set_current_line($line);
+                $deleted = $mbchar . $deleted;
+            }
+        }
+        $this->copy_for_vi($deleted);
+    }
+
+    private function vi_change_meta(string $key, ?int $arg = null): void
+    {
+        if ($this->vi_waiting_operator !== null) {
+            if ($this->vi_waiting_operator === 'vi_change_meta_confirm' && $arg === null) {
+                $this->set_current_line('', 0);
+            }
+            $this->vi_waiting_operator = null;
+            $this->vi_waiting_operator_arg = null;
+        } else {
+            $this->drop_terminate_spaces = true;
+            $this->vi_waiting_operator = 'vi_change_meta_confirm';
+            $this->vi_waiting_operator_arg = $arg ?? 1;
+        }
+    }
+
+    private function vi_change_meta_confirm(int $byte_pointer_diff): void
+    {
+        $this->vi_delete_meta_confirm($byte_pointer_diff);
+        $this->set_editing_mode('vi_insert');
+        $this->drop_terminate_spaces = false;
+    }
+
+    private function vi_delete_meta(string $key, ?int $arg = null): void
+    {
+        if ($this->vi_waiting_operator !== null) {
+            if ($this->vi_waiting_operator === 'vi_delete_meta_confirm' && $arg === null) {
+                $this->set_current_line('', 0);
+            }
+            $this->vi_waiting_operator = null;
+            $this->vi_waiting_operator_arg = null;
+        } else {
+            $this->vi_waiting_operator = 'vi_delete_meta_confirm';
+            $this->vi_waiting_operator_arg = $arg ?? 1;
+        }
+    }
+
+    private function vi_delete_meta_confirm(int $byte_pointer_diff): void
+    {
+        if ($byte_pointer_diff > 0) {
+            [$line, $cut] = $this->byteslice($this->current_line(), $this->byte_pointer, $byte_pointer_diff);
+        } elseif ($byte_pointer_diff < 0) {
+            [$line, $cut] = $this->byteslice($this->current_line(), $this->byte_pointer + $byte_pointer_diff, -$byte_pointer_diff);
+        } else {
+            return;
+        }
+        $this->copy_for_vi($cut);
+        $this->set_current_line($line, $this->byte_pointer + ($byte_pointer_diff < 0 ? $byte_pointer_diff : 0));
+    }
+
+    private function vi_yank(string $key, ?int $arg = null): void
+    {
+        if ($this->vi_waiting_operator !== null) {
+            if ($this->vi_waiting_operator === 'vi_yank_confirm' && $arg === null) {
+                $this->copy_for_vi($this->current_line());
+            }
+            $this->vi_waiting_operator = null;
+            $this->vi_waiting_operator_arg = null;
+        } else {
+            $this->vi_waiting_operator = 'vi_yank_confirm';
+            $this->vi_waiting_operator_arg = $arg ?? 1;
+        }
+    }
+
+    private function vi_yank_confirm(int $byte_pointer_diff): void
+    {
+        if ($byte_pointer_diff > 0) {
+            $cut = \substr($this->current_line(), $this->byte_pointer, $byte_pointer_diff);
+        } elseif ($byte_pointer_diff < 0) {
+            $cut = \substr($this->current_line(), $this->byte_pointer + $byte_pointer_diff, -$byte_pointer_diff);
+        } else {
+            return;
+        }
+        $this->copy_for_vi($cut);
+    }
+
+    private function vi_list_or_eof(string $key): void
+    {
+        if ($this->buffer_empty()) {
+            $this->eof = true;
+            $this->finish();
+        } else {
+            $this->ed_newline($key);
+        }
+    }
+
+    private function vi_end_of_transmission(string $key): void
+    {
+        $this->vi_list_or_eof($key);
+    }
+
+    private function vi_eof_maybe(string $key): void
+    {
+        $this->vi_list_or_eof($key);
+    }
+
+    private function ed_delete_next_char(string $key, int $arg = 1): void
+    {
+        $byteSize = Unicode::get_next_mbchar_size($this->current_line(), $this->byte_pointer);
+        if ($this->current_line() !== '' && $byteSize !== 0) {
+            [$line, $mbchar] = $this->byteslice($this->current_line(), $this->byte_pointer, $byteSize);
+            $this->copy_for_vi($mbchar);
+            if ($this->byte_pointer > 0 && \strlen($this->current_line()) === $this->byte_pointer + $byteSize) {
+                // Deleting the last character steps the cursor back onto the new last.
+                $prevSize = Unicode::get_prev_mbchar_size($line, $this->byte_pointer);
+                $this->set_current_line($line, $this->byte_pointer - $prevSize);
+            } else {
+                $this->set_current_line($line, $this->byte_pointer);
+            }
+        }
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->ed_delete_next_char($key, $arg);
+        }
+    }
+
+    private function vi_to_history_line(string $key): void
+    {
+        if (\count($this->history) === 0) {
+            return;
+        }
+        $this->move_history(0, 'start', 'start');
+    }
+
+    /**
+     * `v` in vi_command: dump the buffer to a temp file, run an external editor
+     * over it, and re-read it back (line_editor.rb:2159). The `$EDITOR` invocation
+     * is injectable (set_vi_histedit_invocation) so tests drive it without spawning
+     * a real editor and its ScreenTest is skipped; the default runs `$EDITOR path`.
+     */
+    private function vi_histedit(string $key): void
+    {
+        $path = \tempnam(\sys_get_temp_dir(), 'reline_histedit');
+        if ($path === false) {
+            return;
+        }
+        \file_put_contents($path, \implode("\n", $this->whole_lines()));
+        $invoke = $this->vi_histedit_invocation ?? static function (string $p): void {
+            $editor = \getenv('EDITOR');
+            if ($editor !== false && $editor !== '') {
+                \system($editor . ' ' . \escapeshellarg($p));
+            }
+        };
+        $invoke($path);
+        $content = (string) \file_get_contents($path);
+        // Ruby String#split("\n") drops trailing empties; an empty read is [''].
+        $this->buffer_of_lines = $content === '' ? [''] : \explode("\n", \rtrim($content, "\n"));
+        if ($this->buffer_of_lines === []) {
+            $this->buffer_of_lines = [''];
+        }
+        $this->line_index = 0;
+        @\unlink($path);
+        $this->finish();
+    }
+
+    private function vi_paste_prev(string $key, int $arg = 1): void
+    {
+        if ($this->vi_clipboard !== '') {
+            $gcs = $this->grapheme_clusters($this->vi_clipboard);
+            \array_pop($gcs);
+            $cursor_point = \implode('', $gcs);
+            $this->set_current_line(
+                $this->byteinsert($this->current_line(), $this->byte_pointer, $this->vi_clipboard),
+                $this->byte_pointer + \strlen($cursor_point),
+            );
+        }
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->vi_paste_prev($key, $arg);
+        }
+    }
+
+    private function vi_paste_next(string $key, int $arg = 1): void
+    {
+        if ($this->vi_clipboard !== '') {
+            $byteSize = Unicode::get_next_mbchar_size($this->current_line(), $this->byte_pointer);
+            $line = $this->byteinsert($this->current_line(), $this->byte_pointer + $byteSize, $this->vi_clipboard);
+            $this->set_current_line($line, $this->byte_pointer + \strlen($this->vi_clipboard));
+        }
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->vi_paste_next($key, $arg);
+        }
+    }
+
+    private function vi_to_column(string $key, int $arg = 0): void
+    {
+        // vi behaviour, not Readline's vi-mode: walk graphemes until the display
+        // width would reach the target column (line_editor.rb:2196).
+        $total_byte_size = 0;
+        $total_width = 0;
+        foreach ($this->grapheme_clusters($this->current_line()) as $gc) {
+            $mbchar_width = Unicode::get_mbchar_width($gc);
+            if (($total_width + $mbchar_width) >= $arg) {
+                break;
+            }
+            $total_byte_size += \strlen($gc);
+            $total_width += $mbchar_width;
+        }
+        $this->byte_pointer = $total_byte_size;
+    }
+
+    private function vi_replace_char(string $key, int $arg = 1): void
+    {
+        $this->waiting_proc = function (string $k, $sym) use ($arg): void {
+            if ($arg === 1) {
+                $byteSize = Unicode::get_next_mbchar_size($this->current_line(), $this->byte_pointer);
+                $before = \substr($this->current_line(), 0, $this->byte_pointer);
+                $remaining_point = $this->byte_pointer + $byteSize;
+                $after = \substr($this->current_line(), $remaining_point);
+                $this->set_current_line($before . $k . $after);
+                $this->waiting_proc = null;
+            } elseif ($arg > 1) {
+                $byteSize = 0;
+                for ($i = 0; $i < $arg; $i++) {
+                    $byteSize += Unicode::get_next_mbchar_size($this->current_line(), $this->byte_pointer + $byteSize);
+                }
+                $before = \substr($this->current_line(), 0, $this->byte_pointer);
+                $remaining_point = $this->byte_pointer + $byteSize;
+                $after = \substr($this->current_line(), $remaining_point);
+                $replaced = \str_repeat($k, $arg);
+                $this->set_current_line($before . $replaced . $after, $this->byte_pointer + \strlen($replaced));
+                $this->waiting_proc = null;
+            }
+        };
+    }
+
+    private function vi_next_char(string $key, int $arg = 1, bool $inclusive = false): void
+    {
+        $this->waiting_proc = function (string $k, $sym) use ($arg, $inclusive): void {
+            $this->search_next_char($k, $arg, false, $inclusive);
+        };
+    }
+
+    private function vi_to_next_char(string $key, int $arg = 1, bool $inclusive = false): void
+    {
+        $this->waiting_proc = function (string $k, $sym) use ($arg, $inclusive): void {
+            $this->search_next_char($k, $arg, true, $inclusive);
+        };
+    }
+
+    private function search_next_char(string $key, int $arg, bool $need_prev_char, bool $inclusive): void
+    {
+        $prev_total = null;
+        $total = null;
+        $found = false;
+        foreach ($this->grapheme_clusters(\substr($this->current_line(), $this->byte_pointer)) as $mbchar) {
+            if ($total === null) {
+                // Skip the cursor point itself.
+                $total = [\strlen($mbchar), Unicode::get_mbchar_width($mbchar)];
+            } else {
+                if ($key === $mbchar) {
+                    $arg -= 1;
+                    if ($arg === 0) {
+                        $found = true;
+                        break;
+                    }
+                }
+                $prev_total = $total;
+                $total = [$total[0] + \strlen($mbchar), $total[1] + Unicode::get_mbchar_width($mbchar)];
+            }
+        }
+        if (!$need_prev_char && $found && $total !== null) {
+            $this->byte_pointer += $total[0];
+        } elseif ($need_prev_char && $found && $prev_total !== null) {
+            $this->byte_pointer += $prev_total[0];
+        }
+        if ($inclusive) {
+            $byteSize = Unicode::get_next_mbchar_size($this->current_line(), $this->byte_pointer);
+            if ($byteSize > 0) {
+                $this->byte_pointer += $byteSize;
+            }
+        }
+        $this->waiting_proc = null;
+    }
+
+    private function vi_prev_char(string $key, int $arg = 1): void
+    {
+        $this->waiting_proc = function (string $k, $sym) use ($arg): void {
+            $this->search_prev_char($k, $arg, false);
+        };
+    }
+
+    private function vi_to_prev_char(string $key, int $arg = 1): void
+    {
+        $this->waiting_proc = function (string $k, $sym) use ($arg): void {
+            $this->search_prev_char($k, $arg, true);
+        };
+    }
+
+    private function search_prev_char(string $key, int $arg, bool $need_next_char): void
+    {
+        $prev_total = null;
+        $total = null;
+        $found = false;
+        $gcs = $this->grapheme_clusters(\substr($this->current_line(), 0, $this->byte_pointer + 1));
+        foreach (\array_reverse($gcs) as $mbchar) {
+            if ($total === null) {
+                // Skip the cursor point itself.
+                $total = [\strlen($mbchar), Unicode::get_mbchar_width($mbchar)];
+            } else {
+                if ($key === $mbchar) {
+                    $arg -= 1;
+                    if ($arg === 0) {
+                        $found = true;
+                        break;
+                    }
+                }
+                $prev_total = $total;
+                $total = [$total[0] + \strlen($mbchar), $total[1] + Unicode::get_mbchar_width($mbchar)];
+            }
+        }
+        if (!$need_next_char && $found && $total !== null) {
+            $this->byte_pointer -= $total[0];
+        } elseif ($need_next_char && $found && $prev_total !== null) {
+            $this->byte_pointer -= $prev_total[0];
+        }
+        $this->waiting_proc = null;
+    }
+
+    private function vi_join_lines(string $key, int $arg = 1): void
+    {
+        if (\count($this->buffer_of_lines) > $this->line_index + 1) {
+            $next_line = \ltrim(\array_splice($this->buffer_of_lines, $this->line_index + 1, 1)[0]);
+            $this->set_current_line($this->current_line() . ' ' . $next_line, \strlen($this->current_line()));
+        }
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->vi_join_lines($key, $arg);
+        }
+    }
+
+    private function vi_change_to_eol(string $key): void
+    {
+        $this->ed_kill_line($key);
+        $this->set_editing_mode('vi_insert');
+    }
+
+    private function vi_kill_line_prev(string $key): void
+    {
+        if ($this->byte_pointer > 0) {
+            [$line, $deleted] = $this->byteslice($this->current_line(), 0, $this->byte_pointer);
+            $this->set_current_line($line, 0);
+            $this->kill_ring->append($deleted, true);
+        }
+    }
+
+    private function unix_line_discard(string $key): void
+    {
+        $this->vi_kill_line_prev($key);
+    }
+
+    private function emacs_editing_mode(string $key): void
+    {
+        $this->set_editing_mode('emacs');
+    }
+
+    private function vi_editing_mode(string $key): void
+    {
+        $this->set_editing_mode('vi_insert');
+    }
+
     // --- Completion (line_editor.rb:1088-1352) -----------------------------
 
     /**
@@ -1975,9 +2803,13 @@ final class LineEditor
      */
     private function check_multiline_prompt(array $buffer, ?string $mode_string): array
     {
-        // @vi_arg (vi, tier 5) would also override the prompt here; the
-        // @searching_prompt override is live for incremental search.
-        $prompt = $this->searching_prompt ?? $this->prompt;
+        // A pending numeric argument shows `(arg: N) `; an active search shows its
+        // prompt; otherwise the normal prompt (line_editor.rb:110-116).
+        if ($this->vi_arg !== null) {
+            $prompt = '(arg: ' . $this->vi_arg . ') ';
+        } else {
+            $prompt = $this->searching_prompt ?? $this->prompt;
+        }
         if (!$this->is_multiline) {
             // Single-line: one prompt, then blanks for any extra lines.
             $mode_string = $this->check_mode_string();
@@ -1996,9 +2828,9 @@ final class LineEditor
                 static fn (string $pr): string => \str_replace("\n", '\\n', $pr),
                 ($this->prompt_proc)($buffer),
             );
-            // @vi_arg (tier 5) or an active search collapses the per-line prompts
+            // A pending argument or an active search collapses the per-line prompts
             // to the single override prompt (line_editor.rb:123).
-            if ($this->searching_prompt !== null) {
+            if ($this->vi_arg !== null || $this->searching_prompt !== null) {
                 $prompt_list = \array_map(static fn (string $pr): string => $prompt, $prompt_list);
             }
             if ($prompt_list === []) {
@@ -2062,7 +2894,7 @@ final class LineEditor
     /** @return list<string> */
     public function prompt_list(): array
     {
-        return $this->with_cache('prompt_list', [$this->whole_lines(), $this->check_mode_string(), null, $this->searching_prompt], function (array $deps) {
+        return $this->with_cache('prompt_list', [$this->whole_lines(), $this->check_mode_string(), $this->vi_arg, $this->searching_prompt], function (array $deps) {
             [$lines, $modeString] = $deps;
 
             return $this->check_multiline_prompt($lines, $modeString);

@@ -204,4 +204,45 @@ final class ReadlineScreenTest extends TestCase
         $this->assertStringNotContainsString('l1', \implode("\n", $rendered));
         $this->assertStringNotContainsString('l2', \implode("\n", $rendered));
     }
+
+    // --- Tier 5: vi mode ---------------------------------------------------
+
+    private function startReadlineVi(int $rows = 4, int $cols = 30): Session
+    {
+        $subject = __DIR__ . '/subjects/readline_vi_subject.php';
+
+        return $this->sessions[] = Session::start($rows, $cols, [\PHP_BINARY, $subject], 0.1, 'prompt>');
+    }
+
+    public function testViOperatorDeleteWordOnScreen(): void
+    {
+        // vi mode set in the subject: type text, ESC to command mode, 0 to the
+        // start of the line, then the operator+motion `dw` deletes the first word.
+        $session = $this->startReadlineVi();
+        $session->write('hello world');
+        $this->assertSame('prompt> hello world', $session->render()[0]);
+
+        $session->write("\x1b"); // ESC -> vi_command mode
+        $session->write('0'); // to beginning of line
+        $session->write('dw'); // delete-word: removes "hello "
+
+        $this->assertSame('prompt> world', $session->render()[0]);
+
+        $session->write("\r"); // accept
+        $this->assertStringContainsString('GOT[world]', \implode("\n", $session->render()));
+    }
+
+    public function testViDeleteCharAndPasteOnScreen(): void
+    {
+        // Type "abc", ESC (cursor on 'c'), 'x' deletes 'c' into the vi clipboard,
+        // then 'p' pastes it back after the new cursor char — a visible round trip.
+        $session = $this->startReadlineVi();
+        $session->write('abc');
+        $session->write("\x1b"); // ESC -> vi_command, cursor on 'c'
+        $session->write('x'); // delete 'c' -> "ab", clipboard = 'c'
+        $this->assertSame('prompt> ab', $session->render()[0]);
+
+        $session->write('p'); // paste 'c' after the cursor char ('b') -> "abc"
+        $this->assertSame('prompt> abc', $session->render()[0]);
+    }
 }

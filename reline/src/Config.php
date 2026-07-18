@@ -8,22 +8,24 @@ use PhPty\Reline\KeyActor\Base;
 use PhPty\Reline\KeyActor\Composite;
 use PhPty\Reline\KeyActor\Emacs;
 use PhPty\Reline\KeyActor\KeyActorInterface;
+use PhPty\Reline\KeyActor\ViCommand;
+use PhPty\Reline\KeyActor\ViInsert;
 
 /**
- * Reline's configuration, ported from lib/reline/config.rb — the tier-1 subset.
+ * Reline's configuration, ported from lib/reline/config.rb.
  *
- * Tier 1 is emacs-only and does not parse inputrc yet (that is tier 7). What is
- * present is the real structure config.rb has, so the parser lands inside this
- * class later without reshaping: three layered keymaps per editing mode
- * (@oneshot over @additional over @default), the editing-mode label, and the
- * variables the rest of the port reads (keyseq_timeout, enable_bracketed_paste,
- * the mode strings, autocompletion / disable_completion). The vi_insert /
- * vi_command keymaps are absent (tier 5); add_default_key_binding_by_keymap for
- * those labels is silently dropped, so the ANSI gate's `set_default_key_bindings`
- * can call for all keymaps unconditionally as upstream does.
+ * inputrc parsing is not here yet (that is tier 7). What is present is the real
+ * structure config.rb has, so the parser lands inside this class later without
+ * reshaping: three layered keymaps per editing mode (@oneshot over @additional
+ * over @default), the editing-mode label, and the variables the rest of the port
+ * reads (keyseq_timeout, enable_bracketed_paste, the mode strings, autocompletion
+ * / disable_completion). All three keymaps (emacs / vi_insert / vi_command) are
+ * wired as of tier 5, so the ANSI gate's `set_default_key_bindings` registers for
+ * every keymap as upstream does; the programmatic `set editing-mode` switch works,
+ * while the inputrc `set editing-mode vi` directive waits for tier 7.
  *
  * This class replaces the tier-0 tests/FakeConfig double: it answers the same
- * KeyStroke-facing contract (key_bindings + editing_mode_is) with the same emacs
+ * KeyStroke-facing contract (key_bindings + editing_mode_is) with the same
  * composite, so the KeyStroke tests drive the real Config now.
  */
 final class Config implements ConfigInterface
@@ -81,14 +83,18 @@ final class Config implements ConfigInterface
 
     public function reset_variables(): void
     {
-        // Tier 1 wires only the emacs keymaps. The vi_insert / vi_command slots
-        // are absent until tier 5; see the class docblock.
+        // The three editing modes each get a default keymap (config.rb:26-33) and
+        // an empty inputrc-additions layer. vi_insert / vi_command landed at tier 5.
         $this->additionalKeyBindings = [
             'emacs' => new Base(),
+            'vi_insert' => new Base(),
+            'vi_command' => new Base(),
         ];
         $this->oneshotKeyBindings = new Base();
         $this->defaultKeyBindings = [
             'emacs' => new Base(Emacs::MAPPING),
+            'vi_insert' => new Base(ViInsert::MAPPING),
+            'vi_command' => new Base(ViCommand::MAPPING),
         ];
         $this->editingModeLabel = 'emacs';
         $this->keymapLabel = 'emacs';
@@ -105,11 +111,14 @@ final class Config implements ConfigInterface
     }
 
     /**
-     * Called from LineEditor#finish. Upstream flips vi_command back to vi_insert
-     * and clears one-shot bindings; tier 1 has no vi, so only the clear remains.
+     * Called from LineEditor#finish. Upstream (config.rb:35-40) flips vi_command
+     * back to vi_insert and clears one-shot bindings.
      */
     public function reset(): void
     {
+        if ($this->editing_mode_is('vi_command')) {
+            $this->editingModeLabel = 'vi_insert';
+        }
         $this->oneshotKeyBindings->clear();
     }
 
@@ -129,6 +138,12 @@ final class Config implements ConfigInterface
     public function editing_mode_is(string ...$labels): bool
     {
         return \in_array($this->editingModeLabel, $labels, true);
+    }
+
+    /** The active editing-mode label ('emacs' / 'vi_insert' / 'vi_command'). */
+    public function editing_mode_label(): string
+    {
+        return $this->editingModeLabel;
     }
 
     // --- Editing mode ------------------------------------------------------
@@ -161,8 +176,8 @@ final class Config implements ConfigInterface
      */
     public function add_default_key_binding_by_keymap(string $keymap, array $keystroke, $target): void
     {
-        // vi keymaps are absent in tier 1; drop their bindings silently so the
-        // ANSI gate can register for every keymap as upstream does.
+        // Unknown keymaps are dropped silently so the ANSI gate can register for
+        // every keymap unconditionally as upstream does.
         if (isset($this->defaultKeyBindings[$keymap])) {
             $this->defaultKeyBindings[$keymap]->add($keystroke, $target);
         }
