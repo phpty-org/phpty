@@ -2,6 +2,10 @@ name: CI
 
 on:
   push:
+    # Release tags point at a commit already built on its branch push, and the
+    # Release workflow does its own real-7.4 verify before tagging — so a
+    # tag push would only duplicate a green run. Branch pushes still trigger.
+    tags-ignore: ['**']
   pull_request:
 
 # Hybrid CI (ADR-0013): PHP comes from setup-php — fast, and every version

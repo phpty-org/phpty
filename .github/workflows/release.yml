@@ -3,7 +3,8 @@ name: Release
 # Manual, and it PUBLISHES. It downgrades the tree to PHP 7.4, verifies it on a
 # real 7.4, then force-updates the read-only split repositories
 # (phpty-org/{vterm,pty,screen-test}) with that code and the given tag — the same
-# tag on every module (lockstep, ADR-0009).
+# tag on every module (lockstep, ADR-0009). Finally it tags the monorepo itself,
+# at the source commit, for provenance.
 #
 # Prerequisites, both out of band:
 #   - a SPLIT_TOKEN secret: a token with push access to the split repositories
@@ -19,7 +20,7 @@ on:
         required: true
 
 permissions:
-  contents: read
+  contents: write # tag the monorepo at the end (the splits use SPLIT_TOKEN, not this)
 
 jobs:
   release:
@@ -118,3 +119,19 @@ jobs:
 
             rm -rf "$dir"
           done
+
+      # Only now that every split has published: tag the monorepo for provenance.
+      # The tag points at the SOURCE commit (github.sha), not the local downgrade
+      # commit above — that commit is never pushed here, so tagging HEAD would
+      # dangle. Annotated, and forced so a re-run re-points it (matching the
+      # splits). Uses the default GITHUB_TOKEN, hence contents: write on the job.
+      - name: tag the monorepo
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "USAMI Kenta"
+          git config user.email "tadsan@zonu.me"
+          git tag -f -a "$TAG" -m "Release ${TAG}" "$SHA"
+          git push --force origin "refs/tags/${TAG}"
