@@ -57,6 +57,10 @@ final class Config implements ConfigInterface
 
     private bool $disableCompletion = false;
 
+    private bool $completionIgnoreCase = false;
+
+    private bool $showAllIfAmbiguous = false;
+
     /** Upstream default is -1 (unlimited); config.rb:61. */
     private int $historySize = -1;
 
@@ -93,6 +97,8 @@ final class Config implements ConfigInterface
         $this->showModeInPrompt = false;
         $this->autocompletion = false;
         $this->disableCompletion = false;
+        $this->completionIgnoreCase = false;
+        $this->showAllIfAmbiguous = false;
         $this->historySize = -1;
         $this->isearchTerminators = null;
         $this->loaded = false;
@@ -227,6 +233,27 @@ final class Config implements ConfigInterface
     public function disable_completion(): bool
     {
         return $this->disableCompletion;
+    }
+
+    public function completion_ignore_case(): bool
+    {
+        return $this->completionIgnoreCase;
+    }
+
+    /** Test/inputrc seam (config.rb variable `completion-ignore-case`). */
+    public function set_completion_ignore_case(bool $value): void
+    {
+        $this->completionIgnoreCase = $value;
+    }
+
+    public function show_all_if_ambiguous(): bool
+    {
+        return $this->showAllIfAmbiguous;
+    }
+
+    public function set_show_all_if_ambiguous(bool $value): void
+    {
+        $this->showAllIfAmbiguous = $value;
     }
 
     public function history_size(): int

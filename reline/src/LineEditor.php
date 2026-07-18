@@ -71,6 +71,83 @@ final class LineEditor
 
     private bool $completion_occurs = false;
 
+    // --- Completion (tier 4) ----------------------------------------------
+
+    /**
+     * The caller's completion function (Reline#completion_proc, reline.rb:132).
+     * Given the word being completed (and optionally the pre/post text, by
+     * arity), returns the candidate list. Pushed in by Core per readline, like
+     * the other caller procs; never cleared by reset_variables.
+     *
+     * @var (callable): (array<int, ?string>|mixed)|null
+     */
+    private $completion_proc = null;
+
+    /**
+     * The character appended after a lone perfect completion (Reline#completion_
+     * append_character, reline.rb:84). Core normalises it to a single char before
+     * pushing it here; default '' inserts nothing. A persistent caller setting.
+     */
+    private string $completion_append_character = '';
+
+    /**
+     * Called with the perfectly-matched word when Tab is pressed again on a
+     * perfect match (Reline#dig_perfect_match_proc, reline.rb:156). Lets IRB dig
+     * into a matched constant/method; unset here disables that continuation.
+     *
+     * @var (callable(string): void)|null
+     */
+    private $dig_perfect_match_proc = null;
+
+    /**
+     * Quote / word-break character sets used to split the line into
+     * preposing/target/postposing (retrieve_completion_block, line_editor.rb:1153).
+     * Upstream reads these off the Reline module (`Reline.completer_quote_
+     * characters`); the injected-not-global deviation pushes them onto the editor
+     * from Core instead. Ruby treats them as Strings and tests membership with
+     * String#include?, so they stay plain strings here (strpos membership).
+     */
+    private string $completer_quote_characters = '"\'';
+
+    private string $completer_word_break_characters = " \t\n`><=;|&{(";
+
+    /**
+     * The active quote character while a completion proc runs (line_editor.rb:1089).
+     * Upstream stashes it on Reline.core for the caller's proc to inspect; kept on
+     * the editor here and exposed through Core.
+     */
+    private ?string $completion_quote_character = null;
+
+    /** The completion FSM state (CompletionState::*), walked by perform_completion. */
+    private string $completion_state = CompletionState::NORMAL;
+
+    /** The cycling-completion cursor while autocompletion / menu-complete runs. */
+    private ?CompletionJourneyState $completion_journey_state = null;
+
+    /** The last word promoted to a perfect match, handed to dig_perfect_match_proc. */
+    private ?string $perfect_matched = null;
+
+    /** The completion menu (the flat all-candidates listing), rendered then cleared. */
+    private ?MenuInfo $menu_info = null;
+
+    // --- Dialogs (tier 4) -------------------------------------------------
+
+    /** @var list<Dialog> the registered dialogs (autocomplete dropdown, IRB adds more) */
+    private array $dialogs = [];
+
+    /** Scrollbar glyphs, chosen in reset() (line_editor.rb:145-165); UTF-8 block chars. */
+    private string $full_block = '█';
+
+    private string $upper_half_block = '▀';
+
+    private string $lower_half_block = '▄';
+
+    private int $block_elem_width = 1;
+
+    private const DIALOG_DEFAULT_HEIGHT = 20;
+
+    private const MINIMUM_SCROLLBAR_HEIGHT = 1;
+
     /** @var array<string, array{0: mixed, 1: mixed}> the with_cache memo table */
     private array $cache = [];
 
@@ -178,6 +255,20 @@ final class LineEditor
         $this->screen_size = $this->io->get_screen_size();
         $this->reset_variables($prompt);
         $this->rendered_screen['base_y'] = $this->io->cursor_pos()->y;
+        // Scrollbar glyphs (line_editor.rb:145-165). The Windows branch is out of
+        // scope; this port is UTF-8-only, so the block-drawing chars are always
+        // available save for the explicit RELINE_ALT_SCROLLBAR ASCII opt-out.
+        if (\getenv('RELINE_ALT_SCROLLBAR') !== false) {
+            $this->full_block = '::';
+            $this->upper_half_block = "''";
+            $this->lower_half_block = '..';
+            $this->block_elem_width = 2;
+        } else {
+            $this->full_block = '█';
+            $this->upper_half_block = '▀';
+            $this->lower_half_block = '▄';
+            $this->block_elem_width = Unicode::calculate_width('█');
+        }
     }
 
     public function reset_variables(string $prompt = ''): void
@@ -196,6 +287,11 @@ final class LineEditor
         $this->interrupted = false;
         $this->resized = false;
         $this->completion_occurs = false;
+        $this->completion_journey_state = null;
+        $this->completion_state = CompletionState::NORMAL;
+        $this->perfect_matched = null;
+        $this->menu_info = null;
+        $this->dialogs = [];
         $this->cache = [];
         $this->rendered_screen = ['base_y' => 0, 'lines' => [], 'cursor_y' => 0];
         $this->undo_redo_history = [[[''], 0, 0]];
@@ -235,6 +331,72 @@ final class LineEditor
     public function set_prompt_proc(?callable $proc): void
     {
         $this->prompt_proc = $proc;
+    }
+
+    /**
+     * Caller completion settings, pushed by Core#inner_readline exactly as
+     * upstream assigns line_editor.completion_proc etc. (reline.rb:320-325). They
+     * persist across resets — they belong to the caller, not the buffer.
+     *
+     * @param (callable): mixed|null $proc
+     */
+    public function set_completion_proc(?callable $proc): void
+    {
+        $this->completion_proc = $proc;
+    }
+
+    /** @return (callable): mixed|null */
+    public function completion_proc(): ?callable
+    {
+        return $this->completion_proc;
+    }
+
+    public function set_completion_append_character(string $value): void
+    {
+        $this->completion_append_character = $value;
+    }
+
+    /** @param (callable(string): void)|null $proc */
+    public function set_dig_perfect_match_proc(?callable $proc): void
+    {
+        $this->dig_perfect_match_proc = $proc;
+    }
+
+    public function set_completer_quote_characters(string $value): void
+    {
+        $this->completer_quote_characters = $value;
+    }
+
+    public function set_completer_word_break_characters(string $value): void
+    {
+        $this->completer_word_break_characters = $value;
+    }
+
+    public function completion_quote_character(): ?string
+    {
+        return $this->completion_quote_character;
+    }
+
+    /** Test / dialog-scope accessors mirroring upstream instance_variable_get reads. */
+    public function completion_state(): string
+    {
+        return $this->completion_state;
+    }
+
+    public function menu_info(): ?MenuInfo
+    {
+        return $this->menu_info;
+    }
+
+    /** @return list<Dialog> */
+    public function dialogs(): array
+    {
+        return $this->dialogs;
+    }
+
+    public function just_cursor_moving(): bool
+    {
+        return $this->just_cursor_moving;
     }
 
     /** For the render-differential unit tests, which set the size directly. */
@@ -378,7 +540,10 @@ final class LineEditor
         $modified = $this->input_key($key);
         if (!$this->in_pasting) {
             $this->scroll_into_view();
+            // @just_cursor_moving lets a dialog proc tell a pure cursor move from
+            // an edit (the autocomplete dropdown ignores cursor-only moves).
             $this->just_cursor_moving = !$modified;
+            $this->update_dialogs($key);
             $this->just_cursor_moving = false;
         }
     }
@@ -396,6 +561,14 @@ final class LineEditor
 
             return null;
         }
+        // A dialog whose name matches the key's method-symbol has trapped the key
+        // (line_editor.rb:1029); it was handled while the dialog updated, so skip
+        // the editor dispatch. The default autocomplete dialog traps nothing.
+        foreach ($this->dialogs as $dialog) {
+            if ($dialog->name() === $key->method_symbol) {
+                return null;
+            }
+        }
 
         $this->completion_occurs = false;
 
@@ -403,6 +576,12 @@ final class LineEditor
 
         $this->prev_action_state = $this->next_action_state;
         $this->next_action_state = [];
+
+        // Leaving a completion clears its FSM / journey (line_editor.rb:1041).
+        if (!$this->completion_occurs) {
+            $this->completion_state = CompletionState::NORMAL;
+            $this->completion_journey_state = null;
+        }
 
         $modified = $oldBufferOfLines !== $this->buffer_of_lines;
 
@@ -412,7 +591,16 @@ final class LineEditor
         $this->restoring = false;
 
         if ($this->in_pasting) {
+            $this->clear_dialogs();
+
             return null;
+        }
+
+        // Autocompletion starts a journey on every edit (line_editor.rb:1056), so
+        // the dropdown follows what is typed without an explicit Tab.
+        if (!$this->completion_occurs && $modified && $this->config !== null && !$this->config->disable_completion() && $this->config->autocompletion()) {
+            $this->process_insert(true);
+            $this->completion_journey_state = $this->retrieve_completion_journey_state();
         }
 
         return $modified;
@@ -1241,6 +1429,512 @@ final class LineEditor
         $this->vi_search_next($key);
     }
 
+    // --- Completion (line_editor.rb:1088-1352) -----------------------------
+
+    /**
+     * Split the current line at the cursor into preposing / target / postposing,
+     * honouring quote and word-break characters, ported from line_editor.rb:1153.
+     * Returns the closing quote too, when the cursor sits at end of line inside an
+     * open quote. Public so the dialog scope's retrieve_completion_block can reach
+     * it (the injected analogue of upstream's DialogProcScope delegation).
+     *
+     * @return array{0: string, 1: string, 2: string, 3: string|null}
+     */
+    public function retrieve_completion_block(): array
+    {
+        $quote_characters = $this->completer_quote_characters;
+        $before = $this->grapheme_clusters(\substr($this->current_line(), 0, $this->byte_pointer));
+        $quote = null;
+        if (\strlen($this->current_line()) === $this->byte_pointer && $quote_characters !== '') {
+            $escaped = false;
+            foreach ($before as $c) {
+                if ($escaped) {
+                    $escaped = false;
+                    continue;
+                }
+                if ($c === '\\') {
+                    $escaped = true;
+                } elseif ($quote !== null) {
+                    if ($c === $quote) {
+                        $quote = null;
+                    }
+                } elseif (\strpos($quote_characters, $c) !== false) {
+                    $quote = $c;
+                }
+            }
+        }
+
+        $word_break_characters = $quote_characters . $this->completer_word_break_characters;
+        $break_index = -1;
+        for ($i = \count($before) - 1; $i >= 0; $i--) {
+            $c = $before[$i];
+            if (\strpos($word_break_characters, $c) !== false || \strpos($quote_characters, $c) !== false) {
+                $break_index = $i;
+                break;
+            }
+        }
+        $preposing = \implode('', \array_slice($before, 0, $break_index + 1));
+        $target = \implode('', \array_slice($before, $break_index + 1));
+        $postposing = \substr($this->current_line(), $this->byte_pointer);
+        $lines = $this->whole_lines();
+        if ($this->line_index > 0) {
+            $preposing = \implode("\n", \array_slice($lines, 0, $this->line_index)) . "\n" . $preposing;
+        }
+        if ((\count($lines) - 1) > $this->line_index) {
+            $postposing = $postposing . "\n" . \implode("\n", \array_slice($lines, $this->line_index + 1));
+        }
+
+        return [$preposing, $target, $postposing, $quote];
+    }
+
+    /**
+     * Call the completion proc with the quote character exposed, ported from
+     * line_editor.rb:1088.
+     *
+     * @return list<int, ?string>|null
+     */
+    public function call_completion_proc(string $pre, string $target, string $post, ?string $quote): ?array
+    {
+        $this->completion_quote_character = $quote;
+        $result = $this->call_completion_proc_with_checking_args($pre, $target, $post);
+        $this->completion_quote_character = null;
+
+        return $result;
+    }
+
+    /**
+     * Invoke the completion proc with the argument count it declares (1, 2, or 3+),
+     * ported from line_editor.rb:1095. Ruby inspects `@completion_proc.parameters`;
+     * PHP reflects the callable's parameter list, treating a variadic as 3+.
+     *
+     * @return list<int, ?string>|null
+     */
+    public function call_completion_proc_with_checking_args(string $pre, string $target, string $post): ?array
+    {
+        $result = null;
+        if ($this->completion_proc !== null) {
+            $ref = new \ReflectionFunction(\Closure::fromCallable($this->completion_proc));
+            $argnum = 0;
+            foreach ($ref->getParameters() as $param) {
+                if ($param->isVariadic()) {
+                    $argnum = 3;
+                    break;
+                }
+                $argnum++;
+            }
+            if ($argnum === 1) {
+                $result = ($this->completion_proc)($target);
+            } elseif ($argnum === 2) {
+                $result = ($this->completion_proc)($target, $pre);
+            } elseif ($argnum >= 3) {
+                $result = ($this->completion_proc)($target, $pre, $post);
+            }
+        }
+
+        return \is_array($result) ? \array_values($result) : null;
+    }
+
+    /**
+     * Keep candidates that start with the target, normalise and de-dup them,
+     * ported from line_editor.rb:816. Nulls in the list are skipped (a proc may
+     * pad the list with nil); case-folding follows completion_ignore_case.
+     *
+     * @param list<int, ?string> $list
+     * @return list<string>
+     */
+    private function filter_normalize_candidates(string $target, array $list): array
+    {
+        $ignore = $this->config !== null && $this->config->completion_ignore_case();
+        $needle = $ignore ? \mb_strtolower($target, 'UTF-8') : $target;
+        $selected = [];
+        foreach ($list as $item) {
+            if ($item === null) {
+                continue;
+            }
+            $haystack = $ignore ? \mb_strtolower($item, 'UTF-8') : $item;
+            if (\strncmp($haystack, $needle, \strlen($needle)) === 0) {
+                $selected[] = $item;
+            }
+        }
+        $normalized = [];
+        foreach ($selected as $item) {
+            if (\class_exists('\\Normalizer')) {
+                $n = \Normalizer::normalize($item, \Normalizer::FORM_C);
+                $normalized[] = $n === false ? $item : $n;
+            } else {
+                $normalized[] = $item;
+            }
+        }
+
+        return \array_values(\array_unique($normalized));
+    }
+
+    /**
+     * Insert the common prefix of the candidates and advance the completion FSM,
+     * ported from line_editor.rb:839. First Tab inserts the shared prefix; a second
+     * lists the candidates (MENU); a lone perfect match appends the append char.
+     *
+     * @param list<int, ?string> $list
+     */
+    private function perform_completion(string $preposing, string $target, string $postposing, ?string $quote, array $list): void
+    {
+        $candidates = $this->filter_normalize_candidates($target, $list);
+
+        switch ($this->completion_state) {
+            case CompletionState::PERFECT_MATCH:
+                if ($this->dig_perfect_match_proc !== null) {
+                    ($this->dig_perfect_match_proc)($this->perfect_matched);
+
+                    return;
+                }
+                break;
+            case CompletionState::MENU:
+                $this->menu($candidates);
+
+                return;
+            case CompletionState::MENU_WITH_PERFECT_MATCH:
+                $this->menu($candidates);
+                $this->completion_state = CompletionState::PERFECT_MATCH;
+
+                return;
+        }
+
+        $completed = Unicode::common_prefix($candidates, $this->config !== null && $this->config->completion_ignore_case());
+        if ($completed === '') {
+            return;
+        }
+
+        $append_character = '';
+        if (\in_array($completed, $candidates, true)) {
+            if (\count($candidates) === 1) {
+                $append_character = $quote ?? $this->completion_append_character;
+                $this->completion_state = CompletionState::PERFECT_MATCH;
+            } elseif ($this->config !== null && $this->config->show_all_if_ambiguous()) {
+                $this->menu($candidates);
+                $this->completion_state = CompletionState::PERFECT_MATCH;
+            } else {
+                $this->completion_state = CompletionState::MENU_WITH_PERFECT_MATCH;
+            }
+            $this->perfect_matched = $completed;
+        } else {
+            $this->completion_state = CompletionState::MENU;
+            if ($this->config !== null && $this->config->show_all_if_ambiguous()) {
+                $this->menu($candidates);
+            }
+        }
+        $whole = \explode("\n", $preposing . $completed . $append_character . $postposing);
+        $this->buffer_of_lines[$this->line_index] = $whole[$this->line_index] ?? '';
+        $toPointer = \explode("\n", $preposing . $completed . $append_character);
+        $line_to_pointer = $toPointer[$this->line_index] ?? '';
+        $this->byte_pointer = \strlen($line_to_pointer);
+    }
+
+    /**
+     * Build the view of the current journey a dialog proc reads, ported from
+     * line_editor.rb:881. Public so the DialogProcScope can reach it.
+     */
+    public function dialog_proc_scope_completion_journey_data(): ?CompletionJourneyData
+    {
+        if ($this->completion_journey_state === null) {
+            return null;
+        }
+        $line_index = $this->completion_journey_state->line_index;
+        $pre_lines = '';
+        for ($i = 0; $i < $line_index; $i++) {
+            $pre_lines .= $this->buffer_of_lines[$i] . "\n";
+        }
+        $post_lines = '';
+        for ($i = $line_index + 1, $n = \count($this->buffer_of_lines); $i < $n; $i++) {
+            $post_lines .= $this->buffer_of_lines[$i] . "\n";
+        }
+
+        return new CompletionJourneyData(
+            $pre_lines . $this->completion_journey_state->pre,
+            $this->completion_journey_state->post . $post_lines,
+            $this->completion_journey_state->list,
+            $this->completion_journey_state->pointer,
+        );
+    }
+
+    /** Move the journey pointer and write the completed word, ported from line_editor.rb:894. */
+    private function move_completed_list(string $direction): bool
+    {
+        if ($this->completion_journey_state === null) {
+            $this->completion_journey_state = $this->retrieve_completion_journey_state();
+        }
+        if ($this->completion_journey_state === null) {
+            return false;
+        }
+
+        $delta = ['up' => -1, 'down' => 1][$direction] ?? null;
+        if ($delta !== null) {
+            $size = \count($this->completion_journey_state->list);
+            // Ruby % is always non-negative for a positive modulus; PHP % is not.
+            $this->completion_journey_state->pointer = ((($this->completion_journey_state->pointer + $delta) % $size) + $size) % $size;
+        }
+        $state = $this->completion_journey_state;
+        $completed = $state->list[$state->pointer];
+        $this->set_current_line($state->pre . $completed . $state->post, \strlen($state->pre) + \strlen($completed));
+
+        return true;
+    }
+
+    /** Set up a fresh journey from the completion proc's result, ported from line_editor.rb:906. */
+    private function retrieve_completion_journey_state(): ?CompletionJourneyState
+    {
+        [$preposing, $target, $postposing, $quote] = $this->retrieve_completion_block();
+        $list = $this->call_completion_proc($preposing, $target, $postposing, $quote);
+        if (!\is_array($list)) {
+            return null;
+        }
+
+        $candidates = [];
+        foreach ($list as $item) {
+            if ($item !== null && \strncmp($item, $target, \strlen($target)) === 0) {
+                $candidates[] = $item;
+            }
+        }
+        if ($candidates === []) {
+            return null;
+        }
+
+        $preLines = \explode("\n", $preposing);
+        $pre = $preLines[\count($preLines) - 1];
+        $postLines = \explode("\n", $postposing);
+        $post = $postLines[0];
+
+        return new CompletionJourneyState(
+            $this->line_index,
+            $pre,
+            $target,
+            $post,
+            \array_merge([$target], $candidates),
+            0,
+        );
+    }
+
+    private function menu(array $list): void
+    {
+        $this->menu_info = new MenuInfo($list);
+    }
+
+    /**
+     * Tab (^I). Ported from line_editor.rb:1306. With autocompletion on it cycles
+     * the journey down; otherwise it runs the completion proc and inserts the
+     * common prefix / lists candidates via perform_completion.
+     */
+    private function complete(string $key): void
+    {
+        if ($this->config !== null && $this->config->disable_completion()) {
+            return;
+        }
+
+        $this->process_insert(true);
+        if ($this->config !== null && $this->config->autocompletion()) {
+            $this->completion_state = CompletionState::NORMAL;
+            $this->completion_occurs = $this->move_completed_list('down');
+        } else {
+            $this->completion_journey_state = null;
+            [$pre, $target, $post, $quote] = $this->retrieve_completion_block();
+            $result = $this->call_completion_proc($pre, $target, $post, $quote);
+            if (\is_array($result)) {
+                $this->completion_occurs = true;
+                $this->perform_completion($pre, $target, $post, $quote, $result);
+            }
+        }
+    }
+
+    private function completion_journey_move(string $direction): void
+    {
+        if ($this->config !== null && $this->config->disable_completion()) {
+            return;
+        }
+        $this->process_insert(true);
+        $this->completion_state = CompletionState::NORMAL;
+        $this->completion_occurs = $this->move_completed_list($direction);
+    }
+
+    private function menu_complete(string $key): void
+    {
+        $this->completion_journey_move('down');
+    }
+
+    private function menu_complete_backward(string $key): void
+    {
+        $this->completion_journey_move('up');
+    }
+
+    private function completion_journey_up(string $key): void
+    {
+        if ($this->config !== null && $this->config->autocompletion()) {
+            $this->completion_journey_move('up');
+        }
+    }
+
+    // --- Dialogs (line_editor.rb:446-798) ----------------------------------
+
+    public function upper_space_height(int $wrapped_cursor_y): int
+    {
+        return $wrapped_cursor_y - $this->screen_scroll_top();
+    }
+
+    public function rest_height(int $wrapped_cursor_y): int
+    {
+        return $this->screen_height() - $wrapped_cursor_y + $this->screen_scroll_top() - $this->rendered_screen['base_y'] - 1;
+    }
+
+    public function clear_dialogs(): void
+    {
+        foreach ($this->dialogs as $dialog) {
+            $dialog->setContents(null);
+            $dialog->trap_key = null;
+        }
+    }
+
+    /**
+     * Register (or replace) a dialog by name, ported from line_editor.rb:699. Core
+     * calls this once per readline from its @dialog_proc_list, after reset().
+     *
+     * @param callable(DialogProcScope): ?DialogRenderInfo $p
+     * @param list<mixed>|null                             $context
+     */
+    public function add_dialog_proc(string $name, callable $p, ?array $context = null): void
+    {
+        $config = $this->config ?? new Config();
+        $dialog = new Dialog($name, $config, new DialogProcScope($this, $config, $p, $context));
+        foreach ($this->dialogs as $i => $d) {
+            if ($d->name() === $name) {
+                $this->dialogs[$i] = $dialog;
+
+                return;
+            }
+        }
+        $this->dialogs[] = $dialog;
+    }
+
+    /** Re-run every dialog proc against the current cursor, ported from line_editor.rb:453. */
+    public function update_dialogs(?Key $key = null): void
+    {
+        [$wrappedCursorX, $wrappedCursorY] = $this->wrapped_cursor_position();
+        foreach ($this->dialogs as $dialog) {
+            $dialog->trap_key = null;
+            $this->update_each_dialog($dialog, $wrappedCursorX, $wrappedCursorY - $this->screen_scroll_top(), $key);
+        }
+    }
+
+    /**
+     * @return array{0: array{0: int, 1: int}, 1: array{0: int, 1: int}} [[xBegin,xEnd),[yBegin,yEnd)]
+     */
+    private function dialog_range(Dialog $dialog, int $dialog_y): array
+    {
+        $xBegin = $dialog->column;
+        $xEnd = $dialog->column + (int) $dialog->width();
+        $yBegin = $dialog_y + $dialog->vertical_offset;
+        $yEnd = $yBegin + \count($dialog->contents() ?? []);
+
+        return [[$xBegin, $xEnd], [$yBegin, $yEnd]];
+    }
+
+    /**
+     * Run one dialog proc and turn its DialogRenderInfo into positioned, coloured,
+     * scroll-clipped overlay rows, ported verbatim from line_editor.rb:716-798.
+     * This is where the dialog is placed above or below the cursor per the space
+     * available (rest_height) and the scrollbar column is drawn.
+     */
+    private function update_each_dialog(Dialog $dialog, int $cursor_column, int $cursor_row, ?Key $key = null): void
+    {
+        $dialog->set_cursor_pos($cursor_column, $cursor_row);
+        $dialog_render_info = $dialog->call($key);
+        if ($dialog_render_info === null || $dialog_render_info->contents === null || $dialog_render_info->contents === []) {
+            $dialog->setContents(null);
+            $dialog->trap_key = null;
+
+            return;
+        }
+        $contents = $dialog_render_info->contents;
+        $pointer = $dialog->pointer;
+        if ($dialog_render_info->width !== null) {
+            $dialog->setWidth($dialog_render_info->width);
+        } else {
+            $widths = \array_map(fn (string $l): int => $this->calculate_width($l, true), $contents);
+            $dialog->setWidth($widths === [] ? 0 : \max($widths));
+        }
+        $height = $dialog_render_info->height ?? self::DIALOG_DEFAULT_HEIGHT;
+        if (\count($contents) < $height) {
+            $height = \count($contents);
+        }
+        if (\count($contents) > $height) {
+            if ($dialog->pointer !== null) {
+                if ($dialog->pointer < 0) {
+                    $dialog->scroll_top = 0;
+                } elseif (($dialog->pointer - $dialog->scroll_top) >= ($height - 1)) {
+                    $dialog->scroll_top = $dialog->pointer - ($height - 1);
+                } elseif (($dialog->pointer - $dialog->scroll_top) < 0) {
+                    $dialog->scroll_top = $dialog->pointer;
+                }
+                $pointer = $dialog->pointer - $dialog->scroll_top;
+            } else {
+                $dialog->scroll_top = 0;
+            }
+            $contents = \array_slice($contents, $dialog->scroll_top, $height);
+        }
+        $scrollbar_pos = null;
+        $bar_height = 0;
+        if ($dialog_render_info->scrollbar && \count($dialog_render_info->contents) > $height) {
+            $bar_max_height = $height * 2;
+            $moving_distance = (\count($dialog_render_info->contents) - $height) * 2;
+            $position_ratio = $dialog->scroll_top === 0 ? 0.0 : (($dialog->scroll_top * 2) / $moving_distance);
+            $bar_height = (int) \floor($bar_max_height * ((\count($contents) * 2) / (\count($dialog_render_info->contents) * 2)));
+            if ($bar_height < self::MINIMUM_SCROLLBAR_HEIGHT) {
+                $bar_height = self::MINIMUM_SCROLLBAR_HEIGHT;
+            }
+            $scrollbar_pos = (int) \floor(($bar_max_height - $bar_height) * $position_ratio);
+        }
+        $dialog->column = $dialog_render_info->pos->x;
+        if ($scrollbar_pos !== null) {
+            $dialog->setWidth($dialog->width() + $this->block_elem_width);
+        }
+        $diff = ($dialog->column + $dialog->width()) - $this->screen_width();
+        if ($diff > 0) {
+            $dialog->column -= $diff;
+        }
+        if ($this->rest_height($this->screen_scroll_top() + $cursor_row) - $dialog_render_info->pos->y >= $height) {
+            $dialog->vertical_offset = $dialog_render_info->pos->y + 1;
+        } elseif ($cursor_row >= $height) {
+            $dialog->vertical_offset = $dialog_render_info->pos->y - $height;
+        } else {
+            $dialog->vertical_offset = $dialog_render_info->pos->y + 1;
+        }
+        if ($dialog->column < 0) {
+            $dialog->column = 0;
+            $dialog->setWidth($this->screen_width());
+        }
+        $face = Face::get($dialog_render_info->face);
+        $scrollbar_sgr = $face['scrollbar'];
+        $default_sgr = $face['default'];
+        $enhanced_sgr = $face['enhanced'];
+        $rendered = [];
+        foreach ($contents as $i => $item) {
+            $line_sgr = $i === $pointer ? $enhanced_sgr : $default_sgr;
+            $str_width = $dialog->width() - ($scrollbar_pos === null ? 0 : $this->block_elem_width);
+            [$str] = Unicode::take_mbchar_range($item, 0, $str_width, false, false, true);
+            $colored_content = $line_sgr . $str;
+            if ($scrollbar_pos !== null) {
+                if ($scrollbar_pos <= ($i * 2) && ($i * 2 + 1) < ($scrollbar_pos + $bar_height)) {
+                    $colored_content .= $scrollbar_sgr . $this->full_block;
+                } elseif ($scrollbar_pos <= ($i * 2) && ($i * 2) < ($scrollbar_pos + $bar_height)) {
+                    $colored_content .= $scrollbar_sgr . $this->upper_half_block;
+                } elseif ($scrollbar_pos <= ($i * 2 + 1) && ($i * 2) < ($scrollbar_pos + $bar_height)) {
+                    $colored_content .= $scrollbar_sgr . $this->lower_half_block;
+                } else {
+                    $colored_content .= $scrollbar_sgr . \str_repeat(' ', $this->block_elem_width);
+                }
+            }
+            $rendered[] = $colored_content;
+        }
+        $dialog->setContents($rendered);
+    }
+
     private function ed_ignore(string $key): void
     {
     }
@@ -1608,10 +2302,50 @@ final class LineEditor
             ];
         }
 
-        // rprompt, menu, and dialog overlay rows are tier 2+ and never populated
-        // here; their branches (upstream line_editor.rb:481-511) collapse to
-        // no-ops with @rprompt/@menu_info nil and @dialogs empty, so the two-cell
-        // rows above are the whole frame in tier 1.
+        // rprompt (overlay index 2, line_editor.rb:481-491) is deferred past tier
+        // 4; its slot stays empty and dialogs still key off index+3 below.
+
+        // The completion menu (line_editor.rb:493-498): each laid-out row becomes a
+        // single-cell overlay line appended after the input, then cleared.
+        if ($this->menu_info !== null) {
+            foreach ($this->menu_info->lines($this->screen_width()) as $item) {
+                $newLines[] = [[0, Unicode::calculate_width($item), $item]];
+            }
+            $this->menu_info = null;
+        }
+
+        // Dialog overlays (line_editor.rb:500-511): each visible dialog paints its
+        // rows into overlay level index+3 (0=prompt, 1=line, 2=rprompt). These are
+        // the overlay levels the ADR-0017 renderer already proved with the upstream
+        // RenderLineDifferentialTest dialog cases; tier 4 finally drives them.
+        foreach ($this->dialogs as $index => $dialog) {
+            if ($dialog->contents() === null) {
+                continue;
+            }
+            [$xRange, $yRange] = $this->dialog_range($dialog, $wrappedCursorY - $this->screen_scroll_top());
+            $contents = $dialog->contents();
+            for ($row = $yRange[0]; $row < $yRange[1]; $row++) {
+                if ($row < 0 || $row >= $this->screen_height()) {
+                    continue;
+                }
+                if (!isset($newLines[$row])) {
+                    $newLines[$row] = [];
+                }
+                $newLines[$row][$index + 3] = [$xRange[0], (int) $dialog->width(), $contents[$row - $yRange[0]]];
+            }
+        }
+        // Ruby's `new_lines[row] ||=` auto-extends the array with nils; PHP leaves
+        // gaps, so backfill any skipped rows to a contiguous 0-indexed list before
+        // the differ walks it (render_differential indexes rows 0..num_lines-1).
+        if ($newLines !== []) {
+            $maxRow = \max(\array_keys($newLines));
+            for ($k = 0; $k <= $maxRow; $k++) {
+                if (!\array_key_exists($k, $newLines)) {
+                    $newLines[$k] = [];
+                }
+            }
+            \ksort($newLines);
+        }
 
         $this->io->buffered_output(function () use ($newLines, $wrappedCursorX, $wrappedCursorY): void {
             $this->render_differential($newLines, $wrappedCursorX, $wrappedCursorY - $this->screen_scroll_top());

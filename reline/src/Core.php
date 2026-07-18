@@ -35,6 +35,35 @@ final class Core
     /** @var resource */
     private $output;
 
+    // --- Completion settings (reline.rb:41-159, 501-506) -------------------
+    // The canonical completion configuration lives on Core (mirroring upstream's
+    // Reline::Core), and inner_readline pushes the per-readline slice onto the
+    // LineEditor — the injected-not-global analogue of upstream reaching these
+    // back through the Reline module from retrieve_completion_block.
+
+    /** @var (callable): mixed|null */
+    private $completion_proc = null;
+
+    private string $completion_append_character = '';
+
+    /** @var (callable(string): void)|null */
+    private $dig_perfect_match_proc = null;
+
+    private string $basic_word_break_characters = " \t\n`><=;|&{(";
+
+    private string $completer_word_break_characters = " \t\n`><=;|&{(";
+
+    private string $basic_quote_characters = '"\'';
+
+    private string $completer_quote_characters = '"\'';
+
+    private string $filename_quote_characters = '';
+
+    private string $special_prefixes = '';
+
+    /** @var array<string, array{proc: callable, context: list<mixed>|null}> registered dialog procs */
+    private array $dialog_proc_list = [];
+
     /**
      * @param resource|null $output the stream the ambiguous-width probe glyph is
      *                              written to; defaults to STDOUT
@@ -58,6 +87,196 @@ final class Core
         $this->io->setSignalServicer(function (): void {
             $this->line_editor->handle_signal();
         });
+        // Register the built-in autocomplete dropdown, as the Reline.core builder
+        // does (reline.rb:507). IRB adds more via add_dialog_proc.
+        $this->add_dialog_proc('autocomplete', self::default_dialog_proc_autocomplete(), []);
+    }
+
+    // --- Completion accessors (Reline module delegates to these) -----------
+
+    /** @param (callable): mixed|null $proc */
+    public function set_completion_proc(?callable $proc): void
+    {
+        $this->completion_proc = $proc;
+    }
+
+    /** @return (callable): mixed|null */
+    public function completion_proc(): ?callable
+    {
+        return $this->completion_proc;
+    }
+
+    /**
+     * Normalise to a single character, ported from reline.rb:84. A multi-char
+     * value keeps only its first character; empty / null clears it.
+     */
+    public function set_completion_append_character(?string $val): void
+    {
+        if ($val === null || $val === '') {
+            $this->completion_append_character = '';
+        } else {
+            $chars = \mb_str_split($val, 1, 'UTF-8');
+            $this->completion_append_character = $chars[0];
+        }
+    }
+
+    public function completion_append_character(): string
+    {
+        return $this->completion_append_character;
+    }
+
+    /** @param (callable(string): void)|null $proc */
+    public function set_dig_perfect_match_proc(?callable $proc): void
+    {
+        $this->dig_perfect_match_proc = $proc;
+    }
+
+    /** @return (callable(string): void)|null */
+    public function dig_perfect_match_proc(): ?callable
+    {
+        return $this->dig_perfect_match_proc;
+    }
+
+    public function set_basic_word_break_characters(string $v): void
+    {
+        $this->basic_word_break_characters = $v;
+    }
+
+    public function set_completer_word_break_characters(string $v): void
+    {
+        $this->completer_word_break_characters = $v;
+    }
+
+    public function completer_word_break_characters(): string
+    {
+        return $this->completer_word_break_characters;
+    }
+
+    public function set_basic_quote_characters(string $v): void
+    {
+        $this->basic_quote_characters = $v;
+    }
+
+    public function set_completer_quote_characters(string $v): void
+    {
+        $this->completer_quote_characters = $v;
+    }
+
+    public function completer_quote_characters(): string
+    {
+        return $this->completer_quote_characters;
+    }
+
+    public function set_filename_quote_characters(string $v): void
+    {
+        $this->filename_quote_characters = $v;
+    }
+
+    public function set_special_prefixes(string $v): void
+    {
+        $this->special_prefixes = $v;
+    }
+
+    /** completion-ignore-case lives on Config (reline.rb:120-126). */
+    public function set_completion_case_fold(bool $v): void
+    {
+        $this->config->set_completion_ignore_case($v);
+    }
+
+    public function completion_case_fold(): bool
+    {
+        return $this->config->completion_ignore_case();
+    }
+
+    /** The quote character in force during the last completion-proc call. */
+    public function completion_quote_character(): ?string
+    {
+        return $this->line_editor->completion_quote_character();
+    }
+
+    public function autocompletion(): bool
+    {
+        return $this->config->autocompletion();
+    }
+
+    public function set_autocompletion(bool $v): void
+    {
+        $this->config->set_autocompletion($v);
+    }
+
+    // --- Dialog procs (reline.rb:162-174) ----------------------------------
+
+    /**
+     * @param callable(DialogProcScope): ?DialogRenderInfo|null $p
+     * @param list<mixed>|null                                  $context
+     */
+    public function add_dialog_proc(string $name, ?callable $p, ?array $context = null): void
+    {
+        if ($p === null) {
+            unset($this->dialog_proc_list[$name]);
+
+            return;
+        }
+        $this->dialog_proc_list[$name] = ['proc' => $p, 'context' => $context];
+    }
+
+    /** @return array{proc: callable, context: list<mixed>|null}|null */
+    public function dialog_proc(string $name): ?array
+    {
+        return $this->dialog_proc_list[$name] ?? null;
+    }
+
+    /**
+     * The built-in autocomplete dropdown, ported from DEFAULT_DIALOG_PROC_
+     * AUTOCOMPLETE (reline.rb:211-247). Upstream runs it under instance_exec so the
+     * scope is `self`; here the scope is the explicit DialogProcScope argument (the
+     * idiom deviation documented on DialogProcScope). Returns null to hide the
+     * dialog, or a DialogRenderInfo describing the candidate dropdown.
+     */
+    public static function default_dialog_proc_autocomplete(): callable
+    {
+        return static function (DialogProcScope $scope): ?DialogRenderInfo {
+            if (!$scope->config()->autocompletion()) {
+                return null;
+            }
+            $journey_data = $scope->completion_journey_data();
+            if ($journey_data === null) {
+                return null;
+            }
+            $target = $journey_data->list[0];
+            $completed = $journey_data->list[$journey_data->pointer];
+            $result = \array_slice($journey_data->list, 1);
+            $pointer = $journey_data->pointer - 1;
+            if ($completed === '' || ($result === [$completed] && $pointer < 0)) {
+                return null;
+            }
+
+            $target_width = Unicode::calculate_width($target);
+            $completed_width = Unicode::calculate_width($completed);
+            if ($scope->cursor_pos()->x <= $completed_width - $target_width) {
+                // Target already rendered on the line above the cursor.
+                $x = $scope->screen_width() - $completed_width;
+                $y = -1;
+            } else {
+                $x = \max($scope->cursor_pos()->x - $completed_width, 0);
+                $y = 0;
+            }
+            $cursor_pos_to_render = new CursorPos($x, $y);
+            // The IRB-facing context.push (reline.rb:235-238) is not consumed
+            // in-port and PHP arrays are value types, so it is omitted.
+            $dialog = $scope->dialog();
+            if ($dialog !== null) {
+                $dialog->pointer = $pointer;
+            }
+
+            return new DialogRenderInfo(
+                $cursor_pos_to_render,
+                $result,
+                'completion_dialog',
+                \min(15, $scope->preferred_dialog_height()),
+                true,
+            );
+        };
     }
 
     public function config(): Config
@@ -167,8 +386,23 @@ final class Core
         } else {
             $this->line_editor->multiline_off();
         }
-        // prompt_proc / auto_indent_proc / rprompt wiring (reline.rb:323-326) is
-        // tier 4+; the LineEditor defaults them to nil, matching an unset Reline.
+        // Push the caller's completion settings onto the editor, as upstream
+        // inner_readline assigns them (reline.rb:320-325). auto_indent_proc and
+        // rprompt remain deferred past tier 4.
+        $this->line_editor->set_completion_proc($this->completion_proc);
+        $this->line_editor->set_completion_append_character($this->completion_append_character);
+        $this->line_editor->set_dig_perfect_match_proc($this->dig_perfect_match_proc);
+        $this->line_editor->set_completer_quote_characters($this->completer_quote_characters);
+        $this->line_editor->set_completer_word_break_characters($this->completer_word_break_characters);
+
+        // Register dialog procs unless the gate is dumb (reline.rb:330-334), then
+        // prime them once before the first render.
+        if (!$this->io->dumb()) {
+            foreach ($this->dialog_proc_list as $name => $d) {
+                $this->line_editor->add_dialog_proc($name, $d['proc'], $d['context']);
+            }
+        }
+        $this->line_editor->update_dialogs();
         $this->line_editor->rerender();
 
         try {

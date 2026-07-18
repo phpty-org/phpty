@@ -64,7 +64,76 @@ once, rather than re-explained at each call site (per ADR-0005's consequences):
   keeps the deferred-flag plumbing but does not re-raise Interrupt (SIGINT
   semantics are not exercised by the tier-1 tests).
 
-## Current status: tier 3
+## Current status: tier 4
+
+Completion and the dialog UI. Tiers 0-3 built the editor, history, and the
+full-shape renderer whose dialog-overlay rows (ADR-0017) had been proven by the
+upstream `RenderLineDifferentialTest` dialog cases but never driven by a real
+dialog; tier 4 finally drives them.
+
+- **Completion core, ported from line_editor.rb:816-1352.** `complete` (Tab / `^I`,
+  the only completion binding the 0.6.3 emacs keymap has) runs
+  `retrieve_completion_block` — the word-break/quote scan that splits the line into
+  preposing/target/postposing — then `call_completion_proc` (arity chosen by
+  reflecting the callable, 1/2/3+ args as upstream reads `proc.parameters`) and
+  `perform_completion`: common-prefix insertion, the append character on a lone
+  perfect match, and the `@completion_state` walk NORMAL →
+  MENU_WITH_PERFECT_MATCH → PERFECT_MATCH → MENU that lists candidates on the
+  second Tab (`MenuInfo`, rendered as the menu overlay). `move_completed_list` +
+  `retrieve_completion_journey_state` drive cycling; `menu_complete` /
+  `menu_complete_backward` / `completion_journey_up` are ported but, as in
+  upstream, **bound to no emacs key** (upstream's own tests reach them by symbol,
+  and so do the ported ones) — the pty tests therefore cycle with Tab.
+- **Autocompletion (`Reline.autocompletion`, default off).** With it on, every edit
+  rebuilds the completion journey (input_key), so the dropdown follows what is
+  typed with no explicit Tab, and Tab cycles the journey instead of inserting a
+  prefix. The accessor lives on `Config` (`autocompletion` / `set_autocompletion`),
+  delegated through Core and the `Reline` facade.
+- **Dialog UI, ported from line_editor.rb:446-798 + reline.rb:161-247.** `Dialog`,
+  `DialogProcScope`, `add_dialog_proc`, `clear_dialogs`, `update_dialogs`,
+  `update_each_dialog`, `dialog_range`, and the deferred-from-tier-2
+  `upper_space_height` / `rest_height` (they are dialog geometry, not scroll
+  inputs — the tier-2 note called this). `DEFAULT_DIALOG_PROC_AUTOCOMPLETE`
+  (the autosuggest dropdown, incl. the scrollbar column and the block glyphs set
+  in `reset`) is registered on Core as `:autocomplete` and pushed to the editor by
+  `inner_readline` unless the gate is dumb, exactly as upstream. The dropdown
+  positions itself below the cursor, or **flips above** when `rest_height` leaves no
+  room and the cursor is `>=` the dialog height down the screen. The render()
+  dialog branch paints each dialog's rows into overlay level `index + 3` (0 prompt,
+  1 line, 2 the still-deferred rprompt), feeding the already-ported overlay
+  renderer.
+- **Ruby `instance_exec` → an explicit scope argument.** Upstream runs a dialog
+  proc under `instance_exec(&proc)` so its `self` is the `DialogProcScope`; PHP has
+  no clean equivalent over an arbitrary closure, so a dialog proc here is
+  `function (DialogProcScope $scope): ?DialogRenderInfo` and reads the same surface
+  through `$scope`. This is the one idiom deviation in the dialog path, recorded on
+  `DialogProcScope`. `CursorPos` is immutable here, so `set_cursor_pos` replaces it
+  rather than mutating `.x`/`.y`.
+- **The injected-not-global completion settings.** Upstream's completion
+  configuration (`completion_proc`, `completion_append_character`, the
+  basic/completer word-break and quote characters, `dig_perfect_match_proc`) lives
+  on `Reline::Core` and `retrieve_completion_block` reaches the word-break/quote
+  sets back through the `Reline` module. Following the injected-not-global IO/history
+  deviation, Core owns the canonical settings (with the upstream accessors:
+  `completion_proc=`, `completion_append_character=` with its single-char
+  normalisation, `completer_word_break_characters=`, `completer_quote_characters=`,
+  `basic_*`, `filename_quote_characters=`, `special_prefixes=`, `completion_case_fold`
+  → `Config#completion_ignore_case`) and `inner_readline` pushes the per-readline
+  slice onto the editor, as upstream assigns `line_editor.completion_proc =` etc.
+- **The dialog colour seam (tier 6 deferred).** Per the tier plan, the Face DSL is
+  tier 6; tier 4 ships `Reline\Face`, a tiny class holding just the two built-in
+  faces the dialog renderer reads (`:default` all-reset, `:completion_dialog` the
+  dropdown colours) with their SGR bytes hardcoded to exactly what face.rb's
+  `load_initial_configs` produces (`\e[0m\e[97;100m` etc.). `update_each_dialog`
+  reads a face by name and indexes its default/enhanced/scrollbar slots, so tier 6
+  drops the real DSL in behind `Face::get` without touching that call site — the
+  class is the whole seam, with a prose pointer to tier 6 on it.
+
+Still out (tiers 5-7): vi mode (both tables + the `vi_*` methods), rprompt,
+`auto_indent_proc` / `output_modifier_proc`, Face theming (the DSL behind the seam
+above), inputrc parsing. The renderer's rprompt row (overlay index 2) stays empty.
+
+## Earlier status: tier 3
 
 History: the store, its navigation, and incremental search. Tier 2 left
 `ed_prev_history`/`ed_next_history` with the multiline vertical-motion branch live
@@ -288,6 +357,28 @@ Tier 3 adds:
   with `add_history`: type and accept a line, then arrow-up (C-p) on the next call
   recalls it and the Screen shows the recalled text (via
   `subjects/readline_history_subject.php`).
+
+Tier 4 adds:
+
+- `LineEditorCompletionTest` — the completion cases of `test_key_actor_emacs.rb`:
+  Tab common-prefix insertion, the second-Tab candidate menu, the perfect-match
+  FSM (incl. `dig_perfect_match_proc` and its disabled variant), the append
+  character, quote-append at end of line, completion-ignore-case, mid-line
+  completion, a nil-padded candidate list, and the autocompletion cycle. Bytes go
+  through `KeyStroke` for Tab (`^I`); `menu_complete` / `menu_complete_backward` /
+  `completion_journey_up` are driven by symbol, as upstream's helper does (they
+  have no default emacs binding).
+- `DialogTest` — the dialog positioning math against the in-memory `LoggingIO` on a
+  small screen: the autocomplete dropdown opening below the cursor near the top,
+  flipping above it near the bottom of a multiline buffer, and vanishing when the
+  edit leaves no candidates.
+- `CompletionScreenTest` — three ScreenTest scenarios on a real Pty: (1) Tab
+  completes a common prefix; (2) `autocompletion=true` shows the dropdown below the
+  cursor with the candidates on the Screen, Tab cycles the highlighted candidate
+  into the buffer, and accepting erases the dialog; (3) the dropdown flips above
+  the cursor when a multiline buffer drives the cursor to the bottom of a short
+  Pty. Subjects live in `tests/subjects/readline_complete_subject.php`,
+  `readline_autocomplete_subject.php`, and `readmultiline_autocomplete_subject.php`.
 
 Run the whole monorepo suite with
 `vendor-bin/phpunit/vendor/bin/phpunit --no-progress` from the repo root, inside
