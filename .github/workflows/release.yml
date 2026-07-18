@@ -1,33 +1,42 @@
-name: Release (dry-run)
+name: Release
 
-# Publication is deferred. This workflow EXECUTES the downgrade and the real
-# PHP 7.4 validation; the split and Packagist steps are placeholders. When ready
-# to publish, add a `push: tags: ['v*']` trigger and turn on the split job.
+# Manual, and it PUBLISHES. It downgrades the tree to PHP 7.4, verifies it on a
+# real 7.4, then force-updates the read-only split repositories
+# (phpty-org/{vterm,pty,screen-test}) with that code and the given tag — the same
+# tag on every module (lockstep, ADR-0009).
+#
+# Prerequisites, both out of band:
+#   - a SPLIT_TOKEN secret: a token with push access to the split repositories
+#   - each package registered on Packagist once, so its webhook then tracks the
+#     split repo. Registration is not done here.
+#
 # See docs/adr/0009-downgrade-on-release-with-rector.md.
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version to release, e.g. v0.1.0 (applied to every module)"
+        required: true
 
 permissions:
   contents: read
 
 jobs:
-  downgrade-and-verify:
-    name: downgrade to 7.4 and verify on real 7.4
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          fetch-depth: 0 # full history: the subtree split needs it
 
       - uses: cachix/install-nix-action@v30
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # Downgrade the whole tree to 7.4 with Rector, then lower the root php
-      # constraint so the tree installs on 7.4. Modules already declare
-      # ^7.4 || ^8.0; only the dev root says ^8.1. This mirrors the blog's "copy
-      # the 7.4 composer" step (ADR-0009). Runs on the flake's PHP.
+      # Downgrade the whole tree to 7.4 with Rector, and lower the root php
+      # constraint so the tree installs on 7.4 for the verification below. The
+      # module composer.json files already declare ^7.4 || ^8.0 and are what ship.
       - name: downgrade to PHP 7.4
         run: |
           nix develop .#default --command bash -c '
@@ -36,43 +45,71 @@ jobs:
             composer require --no-update "php:^7.4 || ^8.0"
           '
 
-      # setup-php gives real 7.4 + FFI but no libghostty; nix gives the exact
-      # pinned library. The two environments meet on this env var (ADR-0008).
-      - name: build pinned libghostty-vt
-        run: |
-          echo "PHPTY_LIBGHOSTTY_VT=$(nix build .#libghostty-vt --print-out-paths)/lib" >> "$GITHUB_ENV"
+      # setup-php gives the real 7.4; nix gives the exact pinned libghostty. They
+      # meet on this env var (ADR-0008/0013).
+      - name: build the pinned libghostty-vt
+        run: echo "PHPTY_LIBGHOSTTY_VT=$(nix build .#libghostty-vt --print-out-paths)/lib" >> "$GITHUB_ENV"
 
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '7.4'
-          extensions: ffi
+          extensions: ffi, mbstring, pcntl, posix
           coverage: none
 
-      # The ship inspection: run the downgraded suite on a real 7.4, the thing
-      # nixpkgs cannot provide (ADR-0008/0009). The phpunit bin lock is pinned to
-      # 12 (resolved on modern PHP), which 7.4 cannot install — so re-resolve the
-      # bin here, where it picks PHPUnit 9.6; the polyfills bridge the two
-      # (ADR-0010).
-      - name: verify on PHP 7.4
+      # The ship inspection: the downgraded suite on a real 7.4, which nixpkgs
+      # cannot provide. The bin lock pins PHPUnit 12 (8.3+), so re-resolve here,
+      # where 7.4 picks 9.6; the polyfills bridge them (ADR-0010).
+      - name: verify the downgraded suite on real 7.4
         run: |
           php -v
           composer update --no-audit
           composer bin phpunit update --no-audit
           vendor-bin/phpunit/vendor/bin/phpunit
 
-  split:
-    name: split to per-module repos (placeholder)
-    needs: downgrade-and-verify
-    runs-on: ubuntu-latest
-    steps:
-      # Deferred. Documents the shape without publishing anything. To enable:
-      # the downgrade job commits its result to a `release` branch, this job runs
-      # splitsh over that branch per module, and each split repo receives the same
-      # tag. Packagist then updates each by webhook.
-      - name: what this will do (not yet)
+      # Commit the downgrade so the subtree split has it at its tip. This commit
+      # is local to the runner — it is never pushed to the monorepo.
+      - name: commit the downgraded tree
         run: |
-          echo "Publication is deferred — nothing is pushed."
-          echo "When enabled, per module (vterm, pty, screen-test):"
-          echo "  splitsh-lite --prefix=<module> --target=heads/split-<module>"
-          echo "  push split-<module> -> phpty-org/<module>, tag \${{ github.ref_name }}"
-          echo "Lockstep: one monorepo tag becomes the same tag in every split repo."
+          git config user.name "USAMI Kenta"
+          git config user.email "tadsan@zonu.me"
+          git add -A
+          git commit -m "Release ${{ github.event.inputs.tag }} (downgraded to PHP 7.4)"
+
+      - name: split → phpty-org/vterm
+        uses: symplify/monorepo-split-github-action@v2.4.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.SPLIT_TOKEN }}
+        with:
+          package_directory: vterm
+          repository_organization: phpty-org
+          repository_name: vterm
+          user_name: "USAMI Kenta"
+          user_email: "tadsan@zonu.me"
+          branch: main
+          tag: ${{ github.event.inputs.tag }}
+
+      - name: split → phpty-org/pty
+        uses: symplify/monorepo-split-github-action@v2.4.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.SPLIT_TOKEN }}
+        with:
+          package_directory: pty
+          repository_organization: phpty-org
+          repository_name: pty
+          user_name: "USAMI Kenta"
+          user_email: "tadsan@zonu.me"
+          branch: main
+          tag: ${{ github.event.inputs.tag }}
+
+      - name: split → phpty-org/screen-test
+        uses: symplify/monorepo-split-github-action@v2.4.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.SPLIT_TOKEN }}
+        with:
+          package_directory: screen-test
+          repository_organization: phpty-org
+          repository_name: screen-test
+          user_name: "USAMI Kenta"
+          user_email: "tadsan@zonu.me"
+          branch: main
+          tag: ${{ github.event.inputs.tag }}

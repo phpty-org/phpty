@@ -8,29 +8,29 @@ distributed package simply *is* the downgraded one, at the same version number.
 
 ## The flow
 
-Releases are cut by tagging the monorepo. A tag fans out to every split repo at
-the same version — versioning is **lockstep** (see below). On a tag, GitHub
-Actions:
+A release is one manual run of `.github/workflows/release.yml`, given a version
+that every module receives — versioning is **lockstep** (see below). One job:
 
-1. Downgrades the whole tree with Rector (`DowngradeLevelSetList::DOWN_TO_PHP_74`).
-2. Commits the result to a `release` branch.
-3. Validates the downgraded tree on **PHP 7.4** — see below.
-4. Runs splitsh over the `release` branch, once per module, pushing each module's
-   subtree to its own repository (`phpty-org/vterm`, `phpty-org/pty`,
-   `phpty-org/screen-test`) with the same tag.
-5. Packagist updates each split repo by webhook.
+1. Downgrades the whole tree with Rector (`->withDowngradeSets(php74: true)`).
+2. Validates the downgraded tree on **PHP 7.4** — see below.
+3. Commits the downgraded tree, locally on the runner.
+4. Runs `symplify/monorepo-split-github-action` once per module, splitting each
+   module's subtree from that commit and force-pushing it to its own repository
+   (`phpty-org/vterm`, `phpty-org/pty`, `phpty-org/screen-test`) with the tag.
+5. Packagist updates each split repo by webhook — once each package is registered,
+   a one-time step done out of band.
 
-Development stays on `main` in modern PHP; the `release` branch holds only
-generated, downgraded code.
+`main` never carries downgraded code: the downgrade commit lives only on the
+release runner.
 
-## Why a release branch, and not straight to the split repos
+## Where the downgraded code lives for the split
 
-splitsh reads a subtree out of a **monorepo ref** — it cannot split code that
-does not exist in the monorepo's history. So the downgraded code must be
-committed to a monorepo branch before splitsh can act on it. The release branch
-is not a stylistic choice; it is splitsh's input. (Rector's own build pushes
-straight to its single distribution repo precisely because it does not split —
-it is one package, and we are several.)
+A subtree split needs the code in a git ref. That ref is the **local commit made
+on the release runner** in step 3 — not a branch pushed to the monorepo. The
+split action reads the runner's checkout, so committing there is enough; nothing
+generated ever reaches `main`. (An earlier draft of this ADR routed the downgrade
+through a pushed `release` branch, which raw splitsh-lite would have needed. The
+symplify action splits the local checkout, so the branch is unnecessary.)
 
 ## Why lockstep versioning
 
@@ -75,12 +75,18 @@ the native library are pinned by different tools, and both are pinned.
   everything (fibers, some `WeakMap` uses). What a module may use is bounded by
   what Rector can lower, and that bound is now a coding constraint, checked by the
   7.4 validation leg.
-- **Prerequisites exist before any of this runs**: the split repos must be
-  created, registered on Packagist, and given push credentials (a deploy key or
-  token per repo). None of that exists yet.
-- Generated downgraded code lives on the `release` branch. It is noise on the
-  branch list, accepted because it is splitsh's required input and never touches
-  `main`.
+- **Two prerequisites remain before a real release run.** The split repos exist
+  (`phpty-org/{vterm,pty,screen-test}`, public, issues/wiki/projects disabled).
+  Still needed: a `SPLIT_TOKEN` secret with push access to them, and a one-time
+  Packagist registration per package so its webhook tracks the split repo. Neither
+  is done here — the workflow is wired but not yet runnable end to end, and it
+  cannot be rehearsed without publishing.
+- **The split repos are read-only, enforced not just documented.** Issues, wiki,
+  and projects are off. GitHub has no switch to disable pull requests, so each
+  module ships a `.github/workflows/close-pull-request.yml` that auto-closes any
+  PR with a pointer upstream. It sits under the module directory, so GitHub
+  ignores it in the monorepo (workflows run only from the repo root) and runs it
+  in the split repo, where the module is the root.
 - `phpty-org/phpty` is the development repo of record; the split repos are
   read-only distribution mirrors, and a pull request against one belongs upstream
   (see [issue-tracker.md](../agents/issue-tracker.md)).
