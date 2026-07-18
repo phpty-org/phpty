@@ -26,8 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # full history: the subtree split needs it
 
       - uses: cachix/install-nix-action@v30
         with:
@@ -77,41 +75,46 @@ jobs:
           git add -A
           git commit -m "Release ${{ github.event.inputs.tag }} (downgraded to PHP 7.4)"
 
-      - name: split → phpty-org/vterm
-        uses: symplify/monorepo-split-github-action@v2.4.5
+      # Push each module's downgraded tree to its read-only split repo. We used to
+      # run symplify/monorepo-split-github-action here (one step per module), but
+      # it runs inside a Docker container where the checkout is owned by the runner
+      # (UID 1001) while git runs as root, so git 2.35.2's safe.directory check
+      # aborts with "detected dubious ownership" and the split fails. Rather than
+      # fight the container, we do the equivalent natively: the action never split
+      # real history anyway — it clones the target, wipes it (keeping .git), copies
+      # the package directory's contents, commits, and force-pushes branch + tag.
+      # That is exactly what this shell step does, on the runner, no container.
+      # (See docs/adr/0009-downgrade-on-release-with-rector.md.)
+      #
+      # The working tree here is the DOWNGRADED tree, already committed locally by
+      # the previous step, so copying from it is correct.
+      - name: split → phpty-org/{vterm,pty,screen-test}
         env:
-          GITHUB_TOKEN: ${{ secrets.SPLIT_TOKEN }}
-        with:
-          package_directory: vterm
-          repository_organization: phpty-org
-          repository_name: vterm
-          user_name: "USAMI Kenta"
-          user_email: "tadsan@zonu.me"
-          branch: main
-          tag: ${{ github.event.inputs.tag }}
+          SPLIT_TOKEN: ${{ secrets.SPLIT_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          for pkg in vterm pty screen-test; do
+            # Fresh clone of the split target. It already has a main branch (only a
+            # .split-init placeholder commit), which the force-push below replaces.
+            dir="$(mktemp -d)"
+            git clone "https://x-access-token:${SPLIT_TOKEN}@github.com/phpty-org/${pkg}.git" "$dir"
 
-      - name: split → phpty-org/pty
-        uses: symplify/monorepo-split-github-action@v2.4.5
-        env:
-          GITHUB_TOKEN: ${{ secrets.SPLIT_TOKEN }}
-        with:
-          package_directory: pty
-          repository_organization: phpty-org
-          repository_name: pty
-          user_name: "USAMI Kenta"
-          user_email: "tadsan@zonu.me"
-          branch: main
-          tag: ${{ github.event.inputs.tag }}
+            # Wipe the tracked tree but keep .git, then lay down this module's files.
+            git -C "$dir" rm -rqf --ignore-unmatch .
+            cp -R "${pkg}/." "$dir"/
 
-      - name: split → phpty-org/screen-test
-        uses: symplify/monorepo-split-github-action@v2.4.5
-        env:
-          GITHUB_TOKEN: ${{ secrets.SPLIT_TOKEN }}
-        with:
-          package_directory: screen-test
-          repository_organization: phpty-org
-          repository_name: screen-test
-          user_name: "USAMI Kenta"
-          user_email: "tadsan@zonu.me"
-          branch: main
-          tag: ${{ github.event.inputs.tag }}
+            git -C "$dir" config user.name "USAMI Kenta"
+            git -C "$dir" config user.email "tadsan@zonu.me"
+            git -C "$dir" add -A
+            # --allow-empty so a no-op re-run (identical tree) still produces a
+            # commit and the force-push/tag below stay idempotent.
+            git -C "$dir" commit --allow-empty -m "Release ${TAG} (split from monorepo)"
+
+            # Force-update main and re-point the tag, both non-fast-forward by design.
+            git -C "$dir" push --force origin HEAD:main
+            git -C "$dir" tag -f "$TAG"
+            git -C "$dir" push --force origin "refs/tags/${TAG}"
+
+            rm -rf "$dir"
+          done
