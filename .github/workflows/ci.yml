@@ -64,13 +64,17 @@ jobs:
       # against libghostty on each version, and the PHPUnit-Polyfills span
       # (ADR-0010): the pinned bin lock is PHPUnit 12 (8.3+), so re-resolve per
       # PHP — 8.1 gets 9, 8.4 gets 12 — and let the polyfills bridge them.
+      #
+      # `timeout` bounds a hang: the screen-test suite drives real subjects on
+      # ptys, so a stuck Subject must fail the job in minutes, not sit until the
+      # runner's own limit.
       - name: test suite
         run: |
           nix develop .#${{ matrix.php }} --command bash -c '
             set -e
             composer install --no-interaction
             composer bin phpunit update --no-interaction --no-audit
-            vendor-bin/phpunit/vendor/bin/phpunit
+            timeout 300 vendor-bin/phpunit/vendor/bin/phpunit
           '
 
   module-deps:
