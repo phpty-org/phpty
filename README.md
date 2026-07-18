@@ -14,7 +14,7 @@ would have seen rather than on a stream of control codes.
 ## Modules
 
 PhPty is a monorepo. Each module is developed here and distributed as its own
-repository. They differ in licence ([`LICENSE`](./LICENSE)) but agree on platform:
+repository. They agree on licence — MPL-2.0 ([`LICENSE.md`](./LICENSE.md)) — and on platform:
 all are developed on modern PHP and shipped as PHP 7.4, downgraded by Rector at
 release — see [ADR-0003](./docs/adr/0003-php-version-uniform-dev-modern-ship-74.md)
 and [ADR-0009](./docs/adr/0009-downgrade-on-release-with-rector.md).

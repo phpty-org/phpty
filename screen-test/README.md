@@ -21,5 +21,5 @@ composer require phpty/screen-test
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and, for how licensing works across PhPty,
+MPL-2.0. See [LICENSE](LICENSE) and, for how licensing works across PhPty,
 [the monorepo's LICENSE](https://github.com/phpty-org/phpty/blob/main/LICENSE).

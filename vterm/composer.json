@@ -1,7 +1,7 @@
 {
     "name": "phpty/vterm",
     "description": "Interpret a terminal byte stream into an inspectable screen by binding libghostty-vt through FFI.",
-    "license": "MIT",
+    "license": "MPL-2.0",
     "keywords": ["terminal", "vt", "emulator", "ffi", "libghostty"],
     "require": {
         "php": "^7.4 || ^8.0",

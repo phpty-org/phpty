@@ -1,5 +1,9 @@
 # Licensing varies by module, driven by upstream
 
+> **Superseded by [ADR-0014](./0014-mpl-2.0-uniform-module-licence.md)** — every
+> PhPty-authored module now ships under MPL-2.0 uniformly; the reline exception
+> below carries over.
+
 Each module is a derivative of a differently-licensed upstream, so a single project-wide licence is not available to us. A port is a derivative work and cannot be relicensed at will.
 
 - **ScreenTest** — modelled on `yamatanooroti` (MIT © 2020 aycabta) closely enough in behaviour that we retain aycabta's notice rather than argue about whether reimplementing an idea makes a derivative work. An MIT notice costs nothing to keep and the credit is owed regardless.

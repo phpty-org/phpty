@@ -2,8 +2,9 @@
 
 PhPty is a monorepo. Each module is developed here and distributed as its own
 repository, split out with a tool in the manner of [splitsh/lite](https://github.com/splitsh/lite).
-Every module owns its `composer.json` and its `LICENSE` — the licence differs
-between modules on purpose ([ADR-0004](./docs/adr/0004-licensing-varies-by-module.md)).
+Every module owns its `composer.json` and its `LICENSE` — all PhPty-authored
+modules ship under MPL-2.0 uniformly
+([ADR-0014](./docs/adr/0014-mpl-2.0-uniform-module-licence.md)).
 The PHP floor does not: all modules are developed on modern PHP and shipped as
 7.4, downgraded by Rector at release
 ([ADR-0003](./docs/adr/0003-php-version-uniform-dev-modern-ship-74.md),

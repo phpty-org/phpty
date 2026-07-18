@@ -1,7 +1,7 @@
 {
     "name": "phpty/screen-test",
     "description": "Drive a program through a pty and assert on the screen it renders. Framework-agnostic, with an optional PHPUnit assertion trait.",
-    "license": "MIT",
+    "license": "MPL-2.0",
     "keywords": ["terminal", "testing", "pty", "screen", "phpunit"],
     "require": {
         "php": "^7.4 || ^8.0",
