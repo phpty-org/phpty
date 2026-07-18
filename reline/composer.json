@@ -1,0 +1,20 @@
+{
+    "name": "phpty/reline",
+    "description": "A port of Ruby's Reline line editor: Unicode width, grapheme and key-input handling for PHP terminal programs.",
+    "license": "(Ruby OR BSD-2-Clause)",
+    "keywords": ["reline", "readline", "line-editor", "terminal", "unicode", "east-asian-width"],
+    "require": {
+        "php": "^7.4 || ^8.0",
+        "ext-mbstring": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "PhPty\\Reline\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PhPty\\Reline\\Tests\\": "tests/"
+        }
+    }
+}
