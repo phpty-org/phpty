@@ -11,12 +11,21 @@ width, grapheme and key-input handling for PHP terminal programs.
 
 ## Status
 
-Early. This is **tier 0** of an incremental port — the pure, terminal-free
-foundation: Unicode width and grapheme measurement, the East Asian Width table,
-the byte-stream-to-key matcher, and the Emacs key map. There is no line editor
-yet. See [`CONTEXT.md`](CONTEXT.md) and the monorepo's
+**Port complete** against Reline gem 0.6.3. The incremental tier plan (tiers 0-7)
+is finished: Unicode width and grapheme measurement, the IO gates, the full
+single- and multi-line editor with the upstream-shape renderer, history and
+incremental search, completion and the dialog UI, both vi keymaps and the `vi_*`
+commands, Face SGR theming, and the inputrc parser.
+
+A handful of upstream surfaces are deliberately **not** ported, consistent with
+the unix/UTF-8-first milestone: the right prompt (`rprompt`), `auto_indent_proc` /
+`output_modifier_proc`, the upstream-undefined `vi_alias` / `vi_comment_out`, the
+Windows IO gate, and non-UTF-8 encodings (SJIS/EUC-JP). See
+[`CONTEXT.md`](CONTEXT.md) for the exhaustive list.
+
+See [`CONTEXT.md`](CONTEXT.md) and the monorepo's
 [`docs/porting/`](https://github.com/phpty-org/phpty/tree/main/docs/porting) for
-the tier plan.
+the tier plan and the porting decisions.
 
 ## Install
 

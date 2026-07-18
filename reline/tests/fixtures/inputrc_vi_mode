@@ -1,0 +1,7 @@
+# ScreenTest fixture: drive vi mode and the mode indicator entirely from inputrc.
+set editing-mode vi
+set show-mode-in-prompt on
+set vi-ins-mode-string [I]
+set vi-cmd-mode-string [C]
+# Small keyseq-timeout so a lone ESC commits (vi-insert -> vi-command) promptly.
+set keyseq-timeout 20

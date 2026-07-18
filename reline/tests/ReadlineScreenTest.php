@@ -245,4 +245,27 @@ final class ReadlineScreenTest extends TestCase
         $session->write('p'); // paste 'c' after the cursor char ('b') -> "abc"
         $this->assertSame('prompt> abc', $session->render()[0]);
     }
+
+    // --- Tier 7: inputrc ---------------------------------------------------
+
+    private function startReadlineInputrc(int $rows = 4, int $cols = 30): Session
+    {
+        $subject = __DIR__ . '/subjects/readline_inputrc_subject.php';
+
+        return $this->sessions[] = Session::start($rows, $cols, [\PHP_BINARY, $subject], 0.1, 'prompt>');
+    }
+
+    public function testInputrcDrivesViModeAndShowsModeIndicator(): void
+    {
+        // The subject reads an inputrc (via $INPUTRC) that sets editing-mode vi,
+        // show-mode-in-prompt on, and the [I]/[C] mode strings. Readline therefore
+        // starts in vi-insert with the [I] indicator prepended to the prompt; ESC
+        // switches to vi-command and the indicator flips to [C].
+        $session = $this->startReadlineInputrc();
+        $session->write('hi');
+        $this->assertSame('[I]prompt> hi', $session->render()[0]);
+
+        $session->write("\x1b"); // ESC -> vi_command mode
+        $this->assertSame('[C]prompt> hi', $session->render()[0]);
+    }
 }

@@ -64,7 +64,130 @@ once, rather than re-explained at each call site (per ADR-0005's consequences):
   keeps the deferred-flag plumbing but does not re-raise Interrupt (SIGINT
   semantics are not exercised by the tier-1 tests).
 
-## Current status: tier 5
+## Current status: port complete (tiers 0-7 against gem 0.6.3)
+
+The port is **complete against Reline 0.6.3 except the recorded absences below**.
+Tiers 0-5 built the editor, history, completion/dialogs, and vi mode; tiers 6-7
+add Face SGR theming and the inputrc parser, closing the last two deferrals
+(`set editing-mode vi` from an inputrc, `isearch-terminators`, the dialog colour
+DSL behind the tier-4 seam).
+
+### The standing absences (unported from upstream 0.6.3, on purpose)
+
+These are the entire surface not carried over; nothing else from 0.6.3 is missing:
+
+- **`rprompt`** — the right-hand prompt. The renderer's overlay index 2 stays
+  empty (it was reserved at tier 1 and never filled); no `Reline.rprompt` accessor.
+- **`auto_indent_proc`** — the multiline auto-indent hook (line_editor.rb:
+  `process_auto_indent`); the accessor and call are not ported.
+- **`output_modifier_proc`** — the per-line output filter (syntax highlight hook).
+- **`vi_alias` (`@`) and `vi_comment_out` (`#`)** — referenced by the vi_command
+  table but *unimplemented upstream in 0.6.3*, so they dispatch to nothing via
+  `wrap_method_call`'s method-exists guard (covered by
+  `unimplemented_vi_command_is_no_op`). Absent because upstream never defined them.
+- **The Windows IO gate** (`Reline::Windows`) — this is a unix milestone; only the
+  ANSI and Dumb gates exist. `set_default_key_bindings`' Windows branch is not ported.
+- **Non-UTF-8 encodings** — upstream's SJIS/EUC-JP handling in `safe_encode`, the
+  `.encode(...)` test variants, `Reline.encoding_system_needs` as anything but
+  UTF-8, and the inputrc line-conversion branch (config.rb:167-176). `convert-meta`
+  is parsed and stored but inert (nothing converts meta bytes), exactly as an
+  unread variable is inert upstream.
+
+Everything else — the `set` variables, `$if`/`$else`/`$endif`/`$include`, the key
+notation grammar, the two vi keymaps, Face's truecolor/256-colour/named-SGR
+builders, `force_truecolor`, the essential-keys validation — is ported.
+
+## Earlier status: tier 7
+
+inputrc parsing, ported from `config.rb`'s parser into `src/Config.php` (structured
+for it since tier 1) and `src/Config/InvalidInputrc.php`. Tier 5 left
+`set editing-mode vi` and `isearch-terminators` waiting on this.
+
+- **File resolution (`inputrc_path` / `read`, config.rb:92-140).** `$INPUTRC` wins;
+  then `~/.inputrc` (kept ahead of XDG for GNU Readline compatibility); then the XDG
+  `readline/inputrc` *if it exists and is already absolute* (the `path ==
+  expand_path(path)` guard — a relative `XDG_CONFIG_HOME` is skipped); then
+  `~/.config/readline/inputrc`; else fall back to `~/.inputrc` even when absent. A
+  missing file is not an error; an `InvalidInputrc` is warned and swallowed.
+  `File.expand_path` is a port-local helper (`~`→`$HOME`, absolutise against cwd,
+  collapse `.`/`..`).
+- **`read_lines` (config.rb:166-215).** Comment skip, line continuation via the
+  chomp/lstrip, `$`-directive dispatch, the skip-guard, then the `set` and four
+  key-binding line regexes. Ruby's `\h`/`\d` in `KEYSEQ_PATTERN` become
+  `[0-9A-Fa-f]`/`[0-9]` (the PCRE spellings), and the pattern runs with the `u`
+  flag so a multibyte mode-string char is one `.` token — a codepoint round-tripped
+  through `mb_chr` in `retrieve_string`.
+- **`$if`/`$else`/`$endif` (config.rb:217-250).** `mode=vi`/`mode=emacs` (mode=vi
+  means vi-*insert*), the exact-string `term`/`version` (recognised but always false
+  in 0.6.3 — there is **no** term prefix match), and the application-name test:
+  **upstream matches `Ruby` and `Reline` exactly** (config.rb:232-234), so those two
+  strings make the condition true and nothing else does. `$include` reads the
+  expanded path; the `if_stack` gives `unclosed if` / `unmatched else` / `unmatched
+  endif` with upstream's message shape.
+- **`set` variables (config.rb:252-312).** Wired to real port state:
+  `editing-mode`, `keymap` (incl. `emacs-ctlx`/`emacs-meta` prefixes and the
+  vi/emacs aliases), `keyseq-timeout`, `history-size`, `completion-ignore-case`,
+  `disable-completion`, `show-all-if-ambiguous`, `isearch-terminators`,
+  `show-mode-in-prompt` + the three mode strings, `enable-bracketed-paste`. The one
+  **stored-but-inert** variable is `convert-meta` (seeded from the gate encoding's
+  US-ASCII-ness, config.rb:65) — parsed and stored, consumed by nothing, exactly as
+  upstream stores an unread variable.
+- **`bind_key` / `parse_key_binding` / `key_notation_to_code` / `parse_keyseq`
+  (config.rb:319-368).** A quoted value is a macro (a `list<int>` byte list to
+  input); an unquoted value is a function name (upstream Symbol → snake_case
+  string) — the same `string|list<int>` union `Base.add` already takes. Bindings
+  land in the `@additional_key_bindings[@keymap_label]` layer with the
+  `@keymap_prefix` prepended, so the `keymap` directive retargets and the Composite
+  layering from tier 0 resolves user bindings over the defaults. `\C-`/`\M-`/`\e`/
+  octal/hex/named-escape notation is decoded exactly (incl. Ruby's `?\d.ord` being
+  `'d'`=100, not DEL).
+- **The three deferred consumer hooks are now driven.** `isearch-terminators` feeds
+  the tier-3 incremental search's `termination_keys` (line_editor.rb:1562);
+  `show-mode-in-prompt` + the mode strings feed `check_mode_string` (now selecting
+  vi_cmd / vi_ins / emacs by the active mode, line_editor.rb:95-107) through the
+  `prompt_list` cache; `enable-bracketed-paste` gates the ANSI prep
+  (ansi.rb / IO/Ansi.php:480). All three were pre-wired at the consumer side in
+  earlier tiers; tier 7 makes the parser populate them.
+- **Port deviations.** `Reline.encoding_system_needs` is UTF-8, so the SJIS/EUC-JP
+  line-conversion branch of `read_lines` is dropped; a line that is not valid UTF-8
+  raises `InvalidInputrc` with the same message shape (`test_invalid_byte_sequence`).
+  `InvalidInputrc`'s `attr_accessor :file, :lineno` become `inputrcFile` / `lineno`
+  because `\Exception` already reserves `$file`/`$line`. Config takes the gate
+  encoding as a constructor argument (upstream reads `Reline::IOGate.encoding`);
+  Core builds the gate first and passes it.
+
+## Earlier status: tier 6
+
+Face SGR theming, ported from `face.rb` into `src/Face.php` + `src/Face/Config.php`,
+replacing the tier-4 hardcoded seam behind `Face::get` **without touching the call
+site** in `update_each_dialog`.
+
+- **The DSL (face.rb:3-199).** `Face::config(name, $block)` registers a face;
+  `Face::getConfig(name)` is upstream's `Face[name]`; `Face::get(?name)` is the
+  tier-4 seam returning the three-slot escape array the dialog renderer reads.
+  `Face\Config::define(name, $values)` builds the SGR — named colours, `bright_`
+  variants, `#rrggbb` truecolor with the 256-colour cube fallback when truecolor is
+  unsupported, and the essential-keys default (`default`/`enhanced`/`scrollbar`
+  fall back to `\e[0m`). `format_to_sgr` prefixes every non-reset sequence with a
+  reset, preserves parameter order, and raises `\InvalidArgumentException`
+  ("invalid SGR parameter" / "unknown face") matching upstream's `ArgumentError`
+  messages. `truecolor` / `force_truecolor` (reconfigures every face) /
+  `reset_to_initial_configs` are ported.
+- **Ruby block/`self` → an explicit Config argument.** `Face.config(:name) { |c|
+  c.define ... }` becomes `Face::config('name', function (Config $c) { $c->define...
+  })` — the same idiom deviation the dialog procs (DialogProcScope) take, recorded
+  on `Face\Config`.
+- **Lazy `load_initial_configs`.** Upstream seeds `:default` / `:completion_dialog`
+  at module load (reline.rb:526); the port has no module-load hook, so it seeds them
+  lazily on first access, which preserves the `configs` key order the tests assert.
+- **Tier-4 continuity, proven.** `:completion_dialog` uses named colours (which do
+  not depend on truecolor), so `Face::get('completion_dialog')` resolves to exactly
+  the bytes the tier-4 hardcoded seam produced (`\e[0m\e[97;100m`, `\e[0m\e[30;47m`,
+  `\e[0m\e[37;100m`) under any `COLORTERM`, and `:default` is all-reset —
+  `FaceTest::testCompletionDialogBytesMatchTier4Seam` and its no-truecolor sibling
+  assert this. The dialog rendering is byte-for-byte unchanged.
+
+## Earlier status: tier 5
 
 Vi mode: both key tables and the ~40 `vi_*` command methods, driven end-to-end.
 Tiers 0-4 built the editor over the emacs keymap; the vi-operator branches of
@@ -119,10 +242,10 @@ keymaps.
   tests reach them via `__send__`); they are ported for completeness and reachable
   by symbol, exactly as the tier-4 unbound completion helpers are.
 
-Still out (tiers 6-7): rprompt, `auto_indent_proc` / `output_modifier_proc`, Face
-theming (the DSL behind the tier-4 seam), inputrc parsing — which is why
-`set editing-mode vi` in an inputrc is not yet honoured (the programmatic
-`set_editing_mode` path works) and `isearch-terminators` stays unset. The
+Still out at tier 5 (landed at tiers 6-7, or recorded as standing absences above):
+Face theming and inputrc parsing landed at tiers 6-7 — so `set editing-mode vi` in
+an inputrc and `isearch-terminators` are now honoured. rprompt,
+`auto_indent_proc` / `output_modifier_proc` remain the standing absences; the
 renderer's rprompt row (overlay index 2) stays empty.
 
 ## Earlier status: tier 4
@@ -461,6 +584,35 @@ Tier 5 adds:
   `subjects/readline_vi_subject.php` (which sets vi mode before readline): type
   `hello world`, ESC, `0`, `dw` and assert the Screen shows `world`; and type
   `abc`, ESC, `x`, `p` for a visible delete-char / paste round trip.
+
+Tier 6 adds:
+
+- `FaceTest` — ports `test_face.rb`: the essential-keys default, named / rgb /
+  256-colour / truecolor SGR builders, `format_to_sgr` order preservation and the
+  reset special-case, `force_truecolor` reconfigure, and the invalid-keyword /
+  invalid-colour / unknown-face error paths. Plus the tier-4 continuity proof — the
+  `:completion_dialog` and `:default` bytes come out identical to the tier-4 seam,
+  under COLORTERM set and unset. The two Ruby-introspection cases (`respond_to?`,
+  private-constant check) are not portable and are omitted.
+
+Tier 7 adds:
+
+- `ConfigTest` — ports `test_config.rb` comprehensively: `set` variables and their
+  string-value quoting, `$if`/`$else`/`$endif` (mode / application / nested), the
+  unclosed/unmatched errors, `$include` (incl. `~` expansion), `bind_key` /
+  `parse_key_binding` for macros, escaped/ctrl/meta/ctrl-meta/octal/hex notation,
+  the additional-vs-default composite layering, the auxiliary emacs keymaps and
+  their prefixes, `history-size`, the file-resolution order (`$INPUTRC` / `~` /
+  XDG absolute-vs-relative), `reload`, and the invalid-UTF-8 line error. Env is
+  manipulated with `putenv` and restored in tearDown; HOME/XDG/cwd are isolated via
+  a temp dir. The non-UTF-8 `test_inputrc_with_eucjp` is out of scope.
+- `ReadlineScreenTest` (tier-7 case) — a Session whose subject points `$INPUTRC` at
+  `fixtures/inputrc_vi_mode` (which sets `editing-mode vi`, `show-mode-in-prompt on`,
+  the `[I]`/`[C]` mode strings, and a small `keyseq-timeout`). Readline starts in
+  vi-insert with the `[I]` indicator on the prompt; ESC switches to vi-command and
+  the Screen shows the indicator flip to `[C]` — driving the whole tier-7 path
+  (file resolution + parser + the show-mode-in-prompt prompt wiring) end-to-end on a
+  real Pty. Subject: `subjects/readline_inputrc_subject.php`.
 
 Run the whole monorepo suite with
 `vendor-bin/phpunit/vendor/bin/phpunit --no-progress` from the repo root, inside

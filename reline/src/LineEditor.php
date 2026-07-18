@@ -2790,8 +2790,17 @@ final class LineEditor
 
     private function check_mode_string(): ?string
     {
+        // line_editor.rb:95-107 — the mode string tracks the active editing mode.
         if ($this->config !== null && $this->config->show_mode_in_prompt()) {
-            return $this->config->emacs_mode_string();
+            if ($this->config->editing_mode_is('vi_command')) {
+                return $this->config->vi_cmd_mode_string();
+            }
+            if ($this->config->editing_mode_is('vi_insert')) {
+                return $this->config->vi_ins_mode_string();
+            }
+            if ($this->config->editing_mode_is('emacs')) {
+                return $this->config->emacs_mode_string();
+            }
         }
 
         return null;

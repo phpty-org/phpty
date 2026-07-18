@@ -70,8 +70,10 @@ final class Core
      */
     public function __construct(?IO $io = null, ?Config $config = null, $output = null)
     {
-        $this->config = $config ?? new Config();
         $this->io = $io ?? IO::decide_io_gate();
+        // Config seeds convert-meta from the gate encoding (upstream reads
+        // Reline::IOGate.encoding in reset_variables); build the gate first.
+        $this->config = $config ?? new Config($this->io->encoding());
         $this->output = $output ?? \STDOUT;
         $this->key_stroke = new KeyStroke($this->config, $this->io->encoding());
         // Upstream builds `Reline::HISTORY = Reline::History.new(Reline.core.config)`
