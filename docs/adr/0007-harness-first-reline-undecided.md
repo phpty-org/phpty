@@ -1,5 +1,9 @@
 # The harness comes first; porting Reline is not yet decided
 
+> **Resolved by [ADR-0015](./0015-port-reline-as-milestone-2.md)** (2026-07-19):
+> Reline is ported; it is milestone 2. The reasoning below stands as the record
+> of why the question stayed open through milestone 1.
+
 PhPty began as "reimplement reline in PHP and embed it in PsySH". Examining
 PsySH at close range changed the premise, on four points of evidence:
 

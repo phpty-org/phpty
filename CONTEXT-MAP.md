@@ -12,14 +12,16 @@ The PHP floor does not: all modules are developed on modern PHP and shipped as
 
 ## Contexts
 
-The first milestone is VTerm and ScreenTest: the rendering-verification
-harness that PsySH lacks. See [ADR-0007](./docs/adr/0007-harness-first-reline-undecided.md).
+The first milestone — VTerm and ScreenTest, the rendering-verification harness
+([ADR-0007](./docs/adr/0007-harness-first-reline-undecided.md)) — shipped as
+v0.1.1. The second is the Reline port
+([ADR-0015](./docs/adr/0015-port-reline-as-milestone-2.md)).
 
 - [VTerm](./vterm/CONTEXT.md) — interprets a byte stream into a Screen
 - [ScreenTest](./screen-test/CONTEXT.md) — drives a Subject through a Pty and asserts on the Screen it renders
 - [Pty](./pty/CONTEXT.md) — creates pseudo-terminal pairs and starts child processes on them
-- [Tty](./tty/CONTEXT.md) — reads and changes the state of the terminal device this process is attached to. Not started; only Reline would consume it
-- Reline — a port of Ruby's reline. Undecided, not merely unstarted: PsySH is building its own interactive readline, so whether this should exist at all is an open question
+- [Tty](./tty/CONTEXT.md) — reads and changes the state of the Tty this process is attached to. The first work item of milestone 2 ([ADR-0016](./docs/adr/0016-tty-io-console-shaped.md)); Reline is its only planned consumer
+- Reline — a port of Ruby's reline (gem 0.6.3, pinned), built in tiers per the survey in [docs/porting/](./docs/porting/reline-architecture-map.md)
 
 ## Relationships
 

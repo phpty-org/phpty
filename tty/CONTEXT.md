@@ -4,11 +4,12 @@ Reads and changes the state of the Tty this process is attached to: raw mode,
 size, and whether a stream is a Tty at all. This is the capability PHP lacks and
 Ruby gets from `io-console`.
 
-This module is not on the critical path. Only Reline would consume it, and
-whether Reline gets ported is undecided — see
-[ADR-0007](../docs/adr/0007-harness-first-reline-undecided.md). It is documented
-here because its constraints are already understood, not because work is starting.
-It alone would carry an `stty` fallback — see
+This module is the first work item of milestone 2, the Reline port
+([ADR-0015](../docs/adr/0015-port-reline-as-milestone-2.md)); Reline is its
+only planned consumer. Its API is deliberately io-console-shaped and small —
+see [ADR-0016](../docs/adr/0016-tty-io-console-shaped.md) for the design and
+the reasoning.
+It alone carries an `stty` fallback — see
 [ADR-0001](../docs/adr/0001-ffi-for-terminal-primitives.md). Its PHP floor is not
 special: every module ships 7.4
 ([ADR-0003](../docs/adr/0003-php-version-uniform-dev-modern-ship-74.md)).
