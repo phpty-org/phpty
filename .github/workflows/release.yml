@@ -41,6 +41,8 @@ jobs:
         run: |
           nix develop .#default --command bash -c '
             set -e
+            composer install --no-interaction
+            composer bin rector install --no-interaction
             vendor-bin/rector/vendor/bin/rector process --config build/rector-downgrade.php --no-progress-bar
             composer require --no-update "php:^7.4 || ^8.0"
           '
