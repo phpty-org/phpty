@@ -1,4 +1,4 @@
-# Release by downgrading on a release branch, then splitting to per-module repos
+# Release by downgrading at tag time, then splitting to per-module repos
 
 Modules are developed in modern PHP and distributed as PHP 7.4 packages. Rector
 performs the downgrade at release time; the modern source is never distributed
