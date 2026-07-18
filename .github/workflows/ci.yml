@@ -161,3 +161,47 @@ jobs:
           composer install --no-interaction
           composer bin rector install --no-interaction
           vendor-bin/rector/vendor/bin/rector process --config build/rector-downgrade.php --no-progress-bar
+
+  test-74:
+    name: downgraded suite on real PHP 7.4
+    runs-on: ubuntu-latest
+    # The whole point: run the SHIPPED (downgraded) code on the version it ships
+    # for. This is where a 7.4-only fault surfaces on every push — as the FFI
+    # struct-by-value one did, but in the release, after a wasted publish attempt.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Rector runs on the flake's modern PHP to downgrade; the suite then runs on
+      # a real 7.4 from setup-php. Two PHP versions in one job — nix for the first,
+      # setup-php for the second.
+      - name: downgrade to PHP 7.4
+        run: |
+          nix develop .#default --command bash -c '
+            set -e
+            composer install --no-interaction
+            composer bin rector install --no-interaction
+            vendor-bin/rector/vendor/bin/rector process --config build/rector-downgrade.php --no-progress-bar
+            composer require --no-update "php:^7.4 || ^8.0"
+          '
+
+      - name: build the pinned libghostty-vt
+        run: echo "PHPTY_LIBGHOSTTY_VT=$(nix build .#libghostty-vt --print-out-paths)/lib" >> "$GITHUB_ENV"
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '7.4'
+          extensions: ffi, mbstring, pcntl, posix
+          coverage: none
+
+      - name: run the downgraded suite on 7.4
+        run: |
+          php -v
+          composer update --no-audit
+          composer bin phpunit update --no-audit
+          vendor-bin/phpunit/vendor/bin/phpunit
