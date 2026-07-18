@@ -18,14 +18,18 @@
         "psr-4": {
             "PhPty\\VTerm\\": "vterm/src/",
             "PhPty\\Pty\\": "pty/src/",
-            "PhPty\\ScreenTest\\": "screen-test/src/"
+            "PhPty\\ScreenTest\\": "screen-test/src/",
+            "PhPty\\Tty\\": "tty/src/",
+            "PhPty\\Reline\\": "reline/src/"
         }
     },
     "autoload-dev": {
         "psr-4": {
             "PhPty\\VTerm\\Tests\\": "vterm/tests/",
             "PhPty\\Pty\\Tests\\": "pty/tests/",
-            "PhPty\\ScreenTest\\Tests\\": "screen-test/tests/"
+            "PhPty\\ScreenTest\\Tests\\": "screen-test/tests/",
+            "PhPty\\Tty\\Tests\\": "tty/tests/",
+            "PhPty\\Reline\\Tests\\": "reline/tests/"
         }
     },
     "config": {

@@ -1,0 +1,22 @@
+{
+    "name": "phpty/tty",
+    "description": "Reads and changes the state of the Tty this process is attached to: raw mode, size, and whether a stream is a Tty at all.",
+    "license": "MPL-2.0",
+    "keywords": ["tty", "termios", "raw-mode", "stty", "ffi"],
+    "require": {
+        "php": "^7.4 || ^8.0"
+    },
+    "suggest": {
+        "ext-ffi": "Selects the faster Ffi Backend; without it Tty falls back to shelling out to stty, which works everywhere but pays a fork+exec per state change."
+    },
+    "autoload": {
+        "psr-4": {
+            "PhPty\\Tty\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PhPty\\Tty\\Tests\\": "tests/"
+        }
+    }
+}

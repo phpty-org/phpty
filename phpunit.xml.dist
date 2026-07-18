@@ -13,6 +13,8 @@
             <directory>vterm/tests</directory>
             <directory>pty/tests</directory>
             <directory>screen-test/tests</directory>
+            <directory>tty/tests</directory>
+            <directory>reline/tests</directory>
         </testsuite>
     </testsuites>
 </phpunit>

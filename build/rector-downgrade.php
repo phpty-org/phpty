@@ -23,6 +23,10 @@ return RectorConfig::configure()
         __DIR__ . '/../pty/tests',
         __DIR__ . '/../screen-test/src',
         __DIR__ . '/../screen-test/tests',
+        __DIR__ . '/../tty/src',
+        __DIR__ . '/../tty/tests',
+        __DIR__ . '/../reline/src',
+        __DIR__ . '/../reline/tests',
     ])
     ->withDowngradeSets(php74: true)
     // This rule evaluates `MHASH_XXH32` at class-load time, a constant the
