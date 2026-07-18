@@ -64,7 +64,72 @@ once, rather than re-explained at each call site (per ADR-0005's consequences):
   keeps the deferred-flag plumbing but does not re-raise Interrupt (SIGINT
   semantics are not exercised by the tier-1 tests).
 
-## Current status: tier 2
+## Current status: tier 3
+
+History: the store, its navigation, and incremental search. Tier 2 left
+`ed_prev_history`/`ed_next_history` with the multiline vertical-motion branch live
+and the `move_history` fall-through a guarded no-op; tier 3 fills that in and adds
+the rest of the history commands the emacs keymap reaches.
+
+- **`History` (`src/History.php`) ports `history.rb`.** Ruby's `Reline::History <
+  Array` becomes a `final class` over an internal `list<string>` that re-exposes
+  the surface reline touches: `ArrayAccess` for `HISTORY[i]` reads (with the
+  upstream `check_index` bounds logic) and `HISTORY[i] = val` writes, `Countable`
+  / `size()`, `IteratorAggregate`, and `push` / `concat` / `pop` / `shift` /
+  `clear` / `delete_at`. The size cap is ported verbatim (history_size 0 drops
+  everything, negative is unlimited, positive trims the oldest — and the leading
+  part of an over-long batch). Upstream's `<<` is not a separate method: for a
+  single value `push` computes the same one-entry trim, so every `HISTORY << val`
+  maps to `push($val)`. `check_index`'s two failure modes survive as
+  `\OutOfRangeException` (IndexError) and `\RangeException` (RangeError).
+  Encoding: `safe_encode` is UTF-8-only (CONTEXT's non-UTF-8 note), so invalid
+  bytes become U+FFFD rather than transcoding to a system encoding.
+- **Injected, not global.** Upstream's `Reline::HISTORY` is a module constant
+  (`reline.rb:528`, `History.new(Reline.core.config)`). Following the
+  injected-not-global IO deviation, the store is owned by `Core`, handed to
+  `LineEditor`'s constructor, and reached via `Reline::HISTORY()` on the facade;
+  every `Reline::HISTORY` upstream is `$this->history` in the editor.
+- **`move_history` and the navigation commands.** `move_history` (line_editor.rb:
+  1607) is ported with its save-back semantics: the current buffer is stashed into
+  `@line_backup_in_history` when leaving the fresh line, or written back into the
+  store when leaving an already-recalled entry, so **an edited history line keeps
+  its edit until the buffer moves off it** — the "leaves the original intact until
+  accept" behaviour, which is upstream keeping edited copies in the store.
+  `ed_prev_history`/`ed_next_history` now call it past the buffer ends;
+  `ed_beginning_of_history`/`ed_end_of_history` (M-<, M->) landed too. `@history_
+  pointer`, `@line_backup_in_history` reset per readline.
+- **Incremental search (C-r / C-s).** `vi_search_prev`/`vi_search_next` (bound to
+  C-r/C-s and M-P/M-N in the emacs keymap) drive `incremental_search_history` +
+  `generate_searcher` (line_editor.rb:1451-1565). The `@waiting_proc` machinery is
+  ported into `process_key`/`wrap_method_call`: while a search runs each key is fed
+  to the proc, a multi-character key ends the wait, C-g cancels and restores, a
+  termination key commits. The search prompt renders through the full-shape
+  renderer — `@searching_prompt` overrides `@prompt` in `check_multiline_prompt`
+  and is a `prompt_list` cache dependency, so the search row redraws as typed.
+  `last_incremental_search` (upstream `Reline.last_incremental_search`, module
+  level) is kept on the reused editor so it survives across readline calls, and is
+  not cleared by `reset_variables`.
+- **`add_history` on accept.** `Core::readline`/`readmultiline` take an
+  `$add_history` flag (reline.rb:276,250): the chomped line / whole buffer is
+  appended to the store when set and non-empty, mirroring upstream's `inner_
+  readline` append. `Config` gains `history_size` (default -1) and a null
+  `isearch_terminators`.
+
+**Reachable from the emacs keymap and ported:** `ed_prev_history`/`previous_
+history`, `ed_next_history`/`next_history`, `ed_beginning_of_history`/`beginning_
+of_history` (M-<), `ed_end_of_history`/`end_of_history` (M->), `vi_search_prev`/
+`reverse_search_history` (C-r, M-P), `vi_search_next`/`forward_search_history`
+(C-s, M-N). **Not reachable in emacs, therefore skipped:** `ed_search_prev_
+history`/`ed_search_next_history` (`history_search_backward`/`forward`) — the
+0.6.3 emacs mapping binds no key to them (upstream's own tests note "doesn't have
+default binding" and call them via `__send__`), so their `search_history` helper
+is not ported. They and the vi keymap's history bindings land with vi (tier 5).
+
+Still out (tiers 4-7): completion/dialogs, rprompt, `auto_indent_proc`, vi mode,
+inputrc parsing (which is why `isearch-terminators` is unset). The renderer's
+rprompt/menu/dialog rows stay empty, as at tier 1.
+
+## Earlier status: tier 2
 
 The multiline editor over the wrapping/scrolling renderer. Tier 1 already landed
 the renderer in full upstream shape (ADR-0017) with the wrap and scroll *inputs*
@@ -108,9 +173,8 @@ and ports the multiline buffer commands, reshaping nothing.
   with the buffer-size padding. `auto_indent_proc`, `rprompt`, and dialogs remain
   tier 4+.
 
-Still out (tiers 3-7): history store and navigation (`move_history`,
-`Reline::HISTORY`), completion/dialogs, rprompt, `auto_indent_proc`, vi mode. The
-renderer's rprompt/menu/dialog rows stay empty, as at tier 1.
+(At tier 2 the history store and navigation were still out; they landed at tier
+3 — see the current-status section above.)
 
 ## Earlier status: tier 1
 
@@ -207,6 +271,23 @@ Tier 2 adds:
   `Reline::readmultiline` over a heredoc-style confirm proc (via
   `subjects/readmultiline_subject.php`) showing both rows then accepting, and an
   8-line buffer scrolling a 6-row screen so the top scrolls off.
+
+Tier 3 adds:
+
+- `HistoryTest` — ports `test_history.rb`: the size cap (0 / negative / positive
+  trimming), the index/get/set semantics with the two failure modes, push chains
+  and `concat`, `pop`/`shift`/`delete_at`, iteration, and the UTF-8 encoding
+  normalisation (the SJIS half is out of scope).
+- `LineEditorHistoryTest` — the history cases of `test_key_actor_emacs.rb`:
+  prev/next navigation (incl. a multiline history entry), the editor-side size
+  cap, the "edited history line kept until accept" behaviour, M-</M->, and the
+  full C-r/C-s incremental-search suite (to-back/to-front, front-and-back,
+  mid-history, twice, last-determined reuse, csi-key cancel, C-g restore). The
+  `isearch-terminators` case needs inputrc (tier 7) and is not ported.
+- `ReadlineScreenTest` (tier-3 case) — one Session, two `Reline::readline` calls
+  with `add_history`: type and accept a line, then arrow-up (C-p) on the next call
+  recalls it and the Screen shows the recalled text (via
+  `subjects/readline_history_subject.php`).
 
 Run the whole monorepo suite with
 `vendor-bin/phpunit/vendor/bin/phpunit --no-progress` from the repo root, inside

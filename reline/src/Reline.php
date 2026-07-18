@@ -27,9 +27,19 @@ final class Reline
         self::$core = $core;
     }
 
-    public static function readline(string $prompt = ''): ?string
+    /**
+     * The shared history store — upstream's `Reline::HISTORY` module constant,
+     * reached here through the singleton Core (the injected-not-global deviation
+     * noted in CONTEXT.md).
+     */
+    public static function HISTORY(): History
     {
-        return self::core()->readline($prompt);
+        return self::core()->history();
+    }
+
+    public static function readline(string $prompt = '', bool $add_history = false): ?string
+    {
+        return self::core()->readline($prompt, $add_history);
     }
 
     /**
@@ -39,9 +49,9 @@ final class Reline
      *
      * @param callable(string): bool $confirm
      */
-    public static function readmultiline(string $prompt, callable $confirm): ?string
+    public static function readmultiline(string $prompt, callable $confirm, bool $add_history = false): ?string
     {
-        return self::core()->readmultiline($prompt, $confirm);
+        return self::core()->readmultiline($prompt, $confirm, $add_history);
     }
 
     public static function get_screen_size(): array

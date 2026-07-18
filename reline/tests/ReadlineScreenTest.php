@@ -173,6 +173,23 @@ final class ReadlineScreenTest extends TestCase
         $this->assertStringContainsString('GOT[hello|EOF]', $rendered);
     }
 
+    public function testHistoryRecallAcrossTwoReadlineCalls(): void
+    {
+        // One Session, two readline calls: type and accept a line, then arrow-up
+        // (C-p) on the next call recalls it from history.
+        $subject = __DIR__ . '/subjects/readline_history_subject.php';
+        $session = $this->sessions[] = Session::start(4, 30, [\PHP_BINARY, $subject], 0.1, 'h>');
+
+        $session->write("hello\r"); // first readline: accept "hello" (added to history)
+        $session->write("\x10"); // C-p on the second readline recalls "hello"
+
+        $this->assertSame('h> hello', $session->render()[0]);
+
+        $session->write("\r"); // accept the recalled line
+        $rendered = \implode("\n", $session->render());
+        $this->assertStringContainsString('GOT[hello|hello]', $rendered);
+    }
+
     public function testTallBufferScrollsAShortScreen(): void
     {
         // rows=6: an 8-line buffer is taller than the screen, so the top scrolls

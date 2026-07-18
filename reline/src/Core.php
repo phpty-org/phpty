@@ -28,6 +28,8 @@ final class Core
 
     private LineEditor $line_editor;
 
+    private History $history;
+
     private IO $io;
 
     /** @var resource */
@@ -43,7 +45,11 @@ final class Core
         $this->io = $io ?? IO::decide_io_gate();
         $this->output = $output ?? \STDOUT;
         $this->key_stroke = new KeyStroke($this->config, $this->io->encoding());
-        $this->line_editor = new LineEditor($this->config, $this->io);
+        // Upstream builds `Reline::HISTORY = Reline::History.new(Reline.core.config)`
+        // as a module constant (reline.rb:528); the injected-not-global deviation
+        // (CONTEXT.md) makes Core the owner and hands the store to the editor.
+        $this->history = new History($this->config);
+        $this->line_editor = new LineEditor($this->config, $this->io, $this->history);
         if ($this->io instanceof IO\Ansi) {
             $this->io->setConfig($this->config);
         }
@@ -64,6 +70,12 @@ final class Core
         return $this->line_editor;
     }
 
+    /** The history store; upstream's `Reline::HISTORY` constant, owned by Core here. */
+    public function history(): History
+    {
+        return $this->history;
+    }
+
     public function io_gate(): IO
     {
         return $this->io;
@@ -79,13 +91,18 @@ final class Core
         return $this->io->get_screen_size();
     }
 
-    public function readline(string $prompt = ''): ?string
+    public function readline(string $prompt = '', bool $add_history = false): ?string
     {
         $this->io->with_raw_input(function () use ($prompt): void {
             $this->inner_readline($prompt, false, null);
         });
 
         $line = $this->line_editor->line();
+        // Append the accepted line (chomped of one trailing newline), matching
+        // reline.rb:284 — only when the caller asked and the line is non-empty.
+        if ($add_history && $line !== null && $this->chomp_newline($line) !== '') {
+            $this->history->push($this->chomp_newline($line));
+        }
         if ($this->line_editor->line() === null) {
             $this->line_editor->reset_line();
         }
@@ -101,13 +118,18 @@ final class Core
      *
      * @param callable(string): bool $confirm_multiline_termination
      */
-    public function readmultiline(string $prompt, callable $confirm_multiline_termination): ?string
+    public function readmultiline(string $prompt, callable $confirm_multiline_termination, bool $add_history = false): ?string
     {
         $this->io->with_raw_input(function () use ($prompt, $confirm_multiline_termination): void {
             $this->inner_readline($prompt, true, $confirm_multiline_termination);
         });
 
         $whole_buffer = $this->line_editor->whole_buffer();
+        // Upstream stores the whole buffer un-chomped, guarded on the chomped
+        // length being non-zero (reline.rb:262).
+        if ($add_history && $this->chomp_newline($whole_buffer) !== '') {
+            $this->history->push($whole_buffer);
+        }
         if ($this->line_editor->eof()) {
             $this->line_editor->reset_line();
 
@@ -115,6 +137,12 @@ final class Core
         }
 
         return $whole_buffer;
+    }
+
+    /** Ruby String#chomp("\n"): strip a single trailing newline. */
+    private function chomp_newline(string $line): string
+    {
+        return \substr($line, -1) === "\n" ? \substr($line, 0, -1) : $line;
     }
 
     /**

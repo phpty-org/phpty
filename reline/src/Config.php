@@ -57,6 +57,15 @@ final class Config implements ConfigInterface
 
     private bool $disableCompletion = false;
 
+    /** Upstream default is -1 (unlimited); config.rb:61. */
+    private int $historySize = -1;
+
+    /**
+     * Keys that terminate incremental search (config.rb:261). Null until inputrc
+     * parsing lands (tier 7); with no terminators only C-j ends the search.
+     */
+    private ?string $isearchTerminators = null;
+
     private bool $loaded = false;
 
     private bool $testMode = false;
@@ -84,6 +93,8 @@ final class Config implements ConfigInterface
         $this->showModeInPrompt = false;
         $this->autocompletion = false;
         $this->disableCompletion = false;
+        $this->historySize = -1;
+        $this->isearchTerminators = null;
         $this->loaded = false;
     }
 
@@ -216,6 +227,22 @@ final class Config implements ConfigInterface
     public function disable_completion(): bool
     {
         return $this->disableCompletion;
+    }
+
+    public function history_size(): int
+    {
+        return $this->historySize;
+    }
+
+    /** Test/inputrc seam: the emacs history tests set this directly, as upstream does. */
+    public function set_history_size(int $value): void
+    {
+        $this->historySize = $value;
+    }
+
+    public function isearch_terminators(): ?string
+    {
+        return $this->isearchTerminators;
     }
 
     public function test_mode(): bool

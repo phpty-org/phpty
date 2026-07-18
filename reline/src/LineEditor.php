@@ -112,12 +112,58 @@ final class LineEditor
      */
     private $prompt_proc = null;
 
-    public function __construct(?Config $config, IO $io)
+    /** The history store. Upstream reaches the global `Reline::HISTORY`; per the
+     * injected-not-global deviation (CONTEXT.md) the store is owned by Core and
+     * handed in here, and every `Reline::HISTORY` upstream is `$this->history`. */
+    private History $history;
+
+    /**
+     * The index into the history store the buffer is currently browsing, or null
+     * when editing a fresh line (line_editor.rb:229). Reset per readline.
+     */
+    private ?int $history_pointer = null;
+
+    /**
+     * The fresh (non-history) line stashed when the user first steps into history,
+     * restored on stepping back past the newest entry (line_editor.rb:266,1612).
+     */
+    private ?string $line_backup_in_history = null;
+
+    /**
+     * The incremental-search prompt shown in place of @prompt while a C-r/C-s
+     * search is running (line_editor.rb:240,112). Null when not searching.
+     */
+    private ?string $searching_prompt = null;
+
+    /**
+     * When set, the next key is handed to this proc instead of dispatched as a
+     * command — the incremental-search reader installs it (line_editor.rb:233,1536).
+     *
+     * @var (callable(string, string|int|null): void)|null
+     */
+    private $waiting_proc = null;
+
+    /**
+     * The last committed incremental-search word, reused when C-r/C-s is pressed
+     * with an empty search (line_editor.rb:1478). Owned by the Core/Reline module
+     * upstream (`Reline.last_incremental_search`); kept on the reused editor here
+     * so it survives across readline calls exactly as the module-level slot does,
+     * and is deliberately not cleared by reset_variables.
+     */
+    private ?string $last_incremental_search = null;
+
+    public function __construct(?Config $config, IO $io, ?History $history = null)
     {
         $this->config = $config;
         $this->io = $io;
         $this->kill_ring = new KillRing();
+        $this->history = $history ?? new History($config ?? new Config());
         $this->reset_variables();
+    }
+
+    public function history(): History
+    {
+        return $this->history;
     }
 
     public function encoding(): string
@@ -139,6 +185,9 @@ final class LineEditor
         $this->prompt = \str_replace("\n", '\\n', $prompt);
         $this->is_multiline = false;
         $this->finished = false;
+        $this->history_pointer = null;
+        $this->waiting_proc = null;
+        $this->searching_prompt = null;
         $this->just_cursor_moving = false;
         $this->eof = false;
         $this->continuous_insertion_buffer = '';
@@ -163,6 +212,7 @@ final class LineEditor
         $this->buffer_of_lines = [''];
         $this->line_index = 0;
         $this->cache = [];
+        $this->line_backup_in_history = null;
     }
 
     public function multiline_on(): void
@@ -373,8 +423,22 @@ final class LineEditor
      */
     private function process_key(string $key, $method_symbol): void
     {
+        // A waiting proc (incremental search) consumes multi-character keys as a
+        // signal to stop waiting (line_editor.rb:998); the vi_waiting_operator
+        // branch is tier 5 and absent.
+        if ($this->waiting_proc !== null && \mb_strlen($key, 'UTF-8') !== 1) {
+            $this->cleanup_waiting();
+        }
         $this->process_insert($method_symbol !== 'ed_insert');
         $this->run_for_operators($key, $method_symbol);
+    }
+
+    private function cleanup_waiting(): void
+    {
+        // The vi_waiting_operator / drop_terminate_spaces state (line_editor.rb:986)
+        // is tier 5; only the search-mode fields are live here.
+        $this->waiting_proc = null;
+        $this->searching_prompt = null;
     }
 
     /**
@@ -394,9 +458,16 @@ final class LineEditor
      */
     public function wrap_method_call($method_symbol, string $key, bool $with_operator): void
     {
-        // Unknown / unbound methods (history and vi commands absent in tier 1)
-        // no-op here, mirroring upstream's `return unless respond_to?`. This is
-        // the ed_unassigned-equivalent: dispatch simply does nothing.
+        // While a search is running the key is fed to the waiting proc rather than
+        // dispatched (line_editor.rb:964).
+        if ($this->waiting_proc !== null) {
+            ($this->waiting_proc)($key, $method_symbol);
+
+            return;
+        }
+        // Unknown / unbound methods (vi commands absent until tier 5) no-op here,
+        // mirroring upstream's `return unless respond_to?`. This is the
+        // ed_unassigned-equivalent: dispatch simply does nothing.
         if (!\is_string($method_symbol) || !\method_exists($this, $method_symbol)) {
             return;
         }
@@ -854,11 +925,54 @@ final class LineEditor
     }
 
     /**
-     * Up-arrow / C-p. Ported from line_editor.rb:1629; the leading branch — move
-     * the cursor up one buffer line, keeping its display column — is the tier-2
-     * multiline vertical motion. The history fall-through (move_history over
-     * Reline::HISTORY) is tier 3: with a single buffer line it would run, so it is
-     * a guarded no-op here, exactly as the unbound history commands were in tier 1.
+     * Replace the whole buffer with a stored history entry, ported from
+     * line_editor.rb:1607. The current buffer is first saved back — into
+     * @line_backup_in_history when leaving the fresh line, or into the history
+     * store when leaving an already-recalled entry — so an edited history line
+     * keeps its edit until the buffer moves off it (the "leaves the original
+     * intact until accept" behaviour). $line and $cursor accept 'start', 'end', or
+     * an explicit index.
+     *
+     * @param 'start'|'end'|int $line
+     * @param 'start'|'end'|int $cursor
+     */
+    private function move_history(?int $history_pointer, $line, $cursor): void
+    {
+        if ($history_pointer === null) {
+            $history_pointer = $this->history->size();
+        }
+        if ($history_pointer < 0 || $history_pointer > $this->history->size()) {
+            return;
+        }
+        $old_history_pointer = $this->history_pointer ?? $this->history->size();
+        if ($old_history_pointer === $this->history->size()) {
+            $this->line_backup_in_history = $this->whole_buffer();
+        } else {
+            $this->history[$old_history_pointer] = $this->whole_buffer();
+        }
+        if ($history_pointer === $this->history->size()) {
+            $buf = $this->line_backup_in_history;
+            $this->history_pointer = null;
+            $this->line_backup_in_history = null;
+        } else {
+            $buf = $this->history[$history_pointer];
+            $this->history_pointer = $history_pointer;
+        }
+        // Ruby String#split("\n") drops trailing empties and an empty string
+        // becomes []; either way upstream falls back to a single empty line.
+        $this->buffer_of_lines = ((string) $buf) === '' ? [''] : \explode("\n", (string) $buf);
+        if ($this->buffer_of_lines === []) {
+            $this->buffer_of_lines = [''];
+        }
+        $this->line_index = $line === 'start' ? 0 : ($line === 'end' ? \count($this->buffer_of_lines) - 1 : $line);
+        $this->byte_pointer = $cursor === 'start' ? 0 : ($cursor === 'end' ? \strlen($this->current_line()) : $cursor);
+    }
+
+    /**
+     * Up-arrow / C-p. Ported from line_editor.rb:1629. The leading branch moves the
+     * cursor up one buffer line, keeping its display column (the multiline vertical
+     * motion landed at tier 2); at the top line it steps back through the history
+     * store via move_history.
      */
     private function ed_prev_history(string $key, int $arg = 1): void
     {
@@ -869,10 +983,23 @@ final class LineEditor
 
             return;
         }
-        // move_history(...) is tier 3 — no history store yet.
+        $this->move_history(
+            ($this->history_pointer ?? $this->history->size()) - 1,
+            'end',
+            $this->config !== null && $this->config->editing_mode_is('vi_command') ? 'start' : 'end',
+        );
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->ed_prev_history($key, $arg);
+        }
     }
 
-    /** Down-arrow / C-n. The multiline half of line_editor.rb:1646; see ed_prev_history. */
+    private function previous_history(string $key, int $arg = 1): void
+    {
+        $this->ed_prev_history($key, $arg);
+    }
+
+    /** Down-arrow / C-n. The mirror of ed_prev_history (line_editor.rb:1646). */
     private function ed_next_history(string $key, int $arg = 1): void
     {
         if ($this->line_index < \count($this->buffer_of_lines) - 1) {
@@ -882,7 +1009,236 @@ final class LineEditor
 
             return;
         }
-        // move_history(...) is tier 3 — no history store yet.
+        $this->move_history(
+            ($this->history_pointer ?? $this->history->size()) + 1,
+            'start',
+            $this->config !== null && $this->config->editing_mode_is('vi_command') ? 'start' : 'end',
+        );
+        $arg -= 1;
+        if ($arg > 0) {
+            $this->ed_next_history($key, $arg);
+        }
+    }
+
+    private function next_history(string $key, int $arg = 1): void
+    {
+        $this->ed_next_history($key, $arg);
+    }
+
+    /** M-<: jump to the oldest history entry (line_editor.rb:1663). */
+    private function ed_beginning_of_history(string $key): void
+    {
+        $this->move_history(0, 'end', 'end');
+    }
+
+    private function beginning_of_history(string $key): void
+    {
+        $this->ed_beginning_of_history($key);
+    }
+
+    /** M->: jump back to the fresh line past the newest entry (line_editor.rb:1668). */
+    private function ed_end_of_history(string $key): void
+    {
+        $this->move_history($this->history->size(), 'end', 'end');
+    }
+
+    private function end_of_history(string $key): void
+    {
+        $this->ed_end_of_history($key);
+    }
+
+    // --- Incremental search (C-r / C-s, line_editor.rb:1451-1565) -----------
+
+    /**
+     * Build the stateful searcher a C-r/C-s session drives one key at a time,
+     * ported from line_editor.rb:1451. Returns [search_word, prompt_name,
+     * hit_pointer]; the closure carries the accumulated word, the running
+     * direction (which C-r/C-s can flip), and the last hit across calls.
+     *
+     * @return callable(string, string|int|null): array{0: string, 1: string, 2: int|null}
+     */
+    private function generate_searcher(string $direction): callable
+    {
+        $search_word = '';
+        $hit_pointer = null;
+
+        return function (string $key, $key_symbol) use (&$search_word, &$hit_pointer, &$direction): array {
+            $search_again = false;
+            switch ($key_symbol) {
+                case 'em_delete_prev_char':
+                case 'backward_delete_char':
+                    $gcs = $this->grapheme_clusters($search_word);
+                    if (\count($gcs) > 0) {
+                        \array_pop($gcs);
+                        $search_word = \implode('', $gcs);
+                    }
+                    break;
+                case 'reverse_search_history':
+                case 'vi_search_prev':
+                    $search_again = $direction === 'reverse';
+                    $direction = 'reverse';
+                    break;
+                case 'forward_search_history':
+                case 'vi_search_next':
+                    $search_again = $direction === 'forward';
+                    $direction = 'forward';
+                    break;
+                default:
+                    $search_word .= $key;
+            }
+            $hit = null;
+            if ($search_word !== '' && $this->line_backup_in_history !== null && \strpos($this->line_backup_in_history, $search_word) !== false) {
+                $hit_pointer = $this->history->size();
+                $hit = $this->line_backup_in_history;
+            } else {
+                if ($search_again) {
+                    if ($search_word === '' && $this->last_incremental_search !== null) {
+                        $search_word = $this->last_incremental_search;
+                    }
+                    if ($this->history_pointer !== null) {
+                        if ($direction === 'reverse') {
+                            $history_pointer_base = 0;
+                            $history = $this->history_slice(0, $this->history_pointer - 1);
+                        } else {
+                            $history_pointer_base = $this->history_pointer + 1;
+                            $history = $this->history_slice($this->history_pointer + 1, -1);
+                        }
+                    } else {
+                        $history_pointer_base = 0;
+                        $history = $this->history->to_a();
+                    }
+                } elseif ($this->history_pointer !== null) {
+                    if ($direction === 'reverse') {
+                        $history_pointer_base = 0;
+                        $history = $this->history_slice(0, $this->history_pointer);
+                    } else {
+                        $history_pointer_base = $this->history_pointer;
+                        $history = $this->history_slice($this->history_pointer, -1);
+                    }
+                } else {
+                    $history_pointer_base = 0;
+                    $history = $this->history->to_a();
+                }
+                $hit_index = null;
+                if ($direction === 'reverse') {
+                    for ($i = \count($history) - 1; $i >= 0; $i--) {
+                        if (\strpos($history[$i], $search_word) !== false) {
+                            $hit_index = $i;
+                            break;
+                        }
+                    }
+                } else {
+                    foreach ($history as $i => $item) {
+                        if (\strpos($item, $search_word) !== false) {
+                            $hit_index = $i;
+                            break;
+                        }
+                    }
+                }
+                if ($hit_index !== null) {
+                    $hit_pointer = $history_pointer_base + $hit_index;
+                    $hit = $this->history[$hit_pointer];
+                }
+            }
+            $prompt_name = $direction === 'forward' ? 'i-search' : 'reverse-i-search';
+            if ($hit === null) {
+                $prompt_name = "failed {$prompt_name}";
+            }
+
+            return [$search_word, $prompt_name, $hit_pointer];
+        };
+    }
+
+    /**
+     * Ruby Array#[a..b] inclusive-range slice with negative-index wrap, so the
+     * `HISTORY[0..(@history_pointer - 1)]` etc. slices in generate_searcher keep
+     * their exact upstream semantics (notably 0..-1 meaning "whole array").
+     *
+     * @return list<string>
+     */
+    private function history_slice(int $start, int $end_inclusive): array
+    {
+        $all = $this->history->to_a();
+        $n = \count($all);
+        $s = $start < 0 ? $start + $n : $start;
+        $e = $end_inclusive < 0 ? $end_inclusive + $n : $end_inclusive;
+        if ($s < 0 || $s > $n) {
+            return [];
+        }
+        if ($e >= $n) {
+            $e = $n - 1;
+        }
+        if ($e < $s) {
+            return [];
+        }
+
+        return \array_values(\array_slice($all, $s, $e - $s + 1));
+    }
+
+    /**
+     * Enter incremental-search mode, ported from line_editor.rb:1528. Installs the
+     * waiting proc that reads each subsequent key: printable keys (and the
+     * search/delete command keys) extend the search and jump the buffer to the
+     * hit; C-g cancels and restores; a termination key commits the current hit.
+     */
+    private function incremental_search_history(string $direction): void
+    {
+        $backup = [$this->buffer_of_lines, $this->line_index, $this->byte_pointer, $this->history_pointer, $this->line_backup_in_history];
+        $searcher = $this->generate_searcher($direction);
+        $prompt_name = $direction === 'forward' ? 'i-search' : 'reverse-i-search';
+        $this->searching_prompt = "({$prompt_name})`': ";
+        $termination_keys = ["\x0a"]; // C-j
+        if ($this->config !== null && $this->config->isearch_terminators() !== null) {
+            $termination_keys = \array_merge($termination_keys, \mb_str_split($this->config->isearch_terminators()));
+        }
+        $accept_key_syms = ['em_delete_prev_char', 'backward_delete_char', 'vi_search_prev', 'vi_search_next', 'reverse_search_history', 'forward_search_history'];
+        $this->waiting_proc = function (string $k, $key_symbol) use ($searcher, $termination_keys, $accept_key_syms, $backup): void {
+            if ($k === "\x07") { // C-g: cancel search and restore buffer
+                [$this->buffer_of_lines, $this->line_index, $this->byte_pointer, $this->history_pointer, $this->line_backup_in_history] = $backup;
+                $this->searching_prompt = null;
+                $this->waiting_proc = null;
+            } elseif (!\in_array($k, $termination_keys, true) && ($this->is_printable($k) || \in_array($key_symbol, $accept_key_syms, true))) {
+                [$search_word, $prompt_name, $hit_pointer] = $searcher($k, $key_symbol);
+                $this->last_incremental_search = $search_word;
+                $this->searching_prompt = \sprintf("(%s)`%s'", $prompt_name, $search_word);
+                if (!$this->is_multiline) {
+                    $this->searching_prompt .= ': ';
+                }
+                if ($hit_pointer !== null) {
+                    $this->move_history($hit_pointer, 'end', 'end');
+                }
+            } else {
+                // Termination keys and other keys commit the current hit.
+                $this->move_history($this->history_pointer, 'end', 'start');
+                $this->searching_prompt = null;
+                $this->waiting_proc = null;
+            }
+        };
+    }
+
+    private function is_printable(string $k): bool
+    {
+        return \preg_match('/[[:print:]]/', $k) === 1;
+    }
+
+    private function vi_search_prev(string $key): void
+    {
+        $this->incremental_search_history('reverse');
+    }
+
+    private function reverse_search_history(string $key): void
+    {
+        $this->vi_search_prev($key);
+    }
+
+    private function vi_search_next(string $key): void
+    {
+        $this->incremental_search_history('forward');
+    }
+
+    private function forward_search_history(string $key): void
+    {
+        $this->vi_search_next($key);
     }
 
     private function ed_ignore(string $key): void
@@ -925,9 +1281,9 @@ final class LineEditor
      */
     private function check_multiline_prompt(array $buffer, ?string $mode_string): array
     {
-        // @vi_arg / @searching_prompt would override the prompt here (both vi/history,
-        // absent in tier 2), so the prompt is always the static @prompt.
-        $prompt = $this->prompt;
+        // @vi_arg (vi, tier 5) would also override the prompt here; the
+        // @searching_prompt override is live for incremental search.
+        $prompt = $this->searching_prompt ?? $this->prompt;
         if (!$this->is_multiline) {
             // Single-line: one prompt, then blanks for any extra lines.
             $mode_string = $this->check_mode_string();
@@ -946,14 +1302,17 @@ final class LineEditor
                 static fn (string $pr): string => \str_replace("\n", '\\n', $pr),
                 ($this->prompt_proc)($buffer),
             );
+            // @vi_arg (tier 5) or an active search collapses the per-line prompts
+            // to the single override prompt (line_editor.rb:123).
+            if ($this->searching_prompt !== null) {
+                $prompt_list = \array_map(static fn (string $pr): string => $prompt, $prompt_list);
+            }
             if ($prompt_list === []) {
                 $prompt_list = [$prompt];
             }
             if ($mode_string !== null) {
                 $prompt_list = \array_map(static fn (string $pr): string => $mode_string . $pr, $prompt_list);
             }
-            // Upstream reassigns a `prompt` local here for @vi_arg/@searching_prompt;
-            // both are absent, so only the buffer-size padding below is observable.
             if (\count($buffer) > \count($prompt_list)) {
                 $last = $prompt_list[\count($prompt_list) - 1];
                 for ($i = 0, $n = \count($buffer) - \count($prompt_list); $i < $n; $i++) {
@@ -1009,7 +1368,7 @@ final class LineEditor
     /** @return list<string> */
     public function prompt_list(): array
     {
-        return $this->with_cache('prompt_list', [$this->whole_lines(), $this->check_mode_string(), null, null], function (array $deps) {
+        return $this->with_cache('prompt_list', [$this->whole_lines(), $this->check_mode_string(), null, $this->searching_prompt], function (array $deps) {
             [$lines, $modeString] = $deps;
 
             return $this->check_multiline_prompt($lines, $modeString);
