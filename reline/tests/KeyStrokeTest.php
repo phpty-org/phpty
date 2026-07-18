@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PhPty\Reline\Tests;
 
+use PhPty\Reline\Config;
 use PhPty\Reline\Key;
 use PhPty\Reline\KeyStroke;
 use Yoast\PHPUnitPolyfills\TestCases\TestCase;
@@ -27,7 +28,7 @@ final class KeyStrokeTest extends TestCase
 
     public function testMatchStatus(): void
     {
-        $config = new FakeConfig();
+        $config = new Config();
         $bindings = [
             'a' => 'xx',
             'ab' => 'y',
@@ -51,7 +52,7 @@ final class KeyStrokeTest extends TestCase
 
     public function testMatchUnknown(): void
     {
-        $config = new FakeConfig();
+        $config = new Config();
         $config->add_default_key_binding(self::bytesOf("\e[9abc"), 'x');
         $stroke = new KeyStroke($config, self::ENCODING);
         $sequences = [
@@ -77,7 +78,7 @@ final class KeyStrokeTest extends TestCase
 
     public function testExpand(): void
     {
-        $config = new FakeConfig();
+        $config = new Config();
         $config->add_default_key_binding(self::bytesOf('abc'), self::bytesOf('AB'));
         $config->add_default_key_binding(self::bytesOf('ab'), self::bytesOf("1\x01")); // "1\C-a"
         $stroke = new KeyStroke($config, self::ENCODING);
@@ -99,7 +100,7 @@ final class KeyStrokeTest extends TestCase
 
     public function testOneshotKeyBindings(): void
     {
-        $config = new FakeConfig();
+        $config = new Config();
         $config->add_oneshot_key_binding(self::bytesOf('abc'), self::bytesOf('123'));
         // IRB version <= 1.13.1 wrongly uses Reline::Key. It should be ignored without error.
         $config->add_oneshot_key_binding([new Key(null, 0xE4, true)], self::bytesOf('012'));
@@ -118,7 +119,7 @@ final class KeyStrokeTest extends TestCase
     public function testMultibyteMatching(): void
     {
         $char = 'あ';
-        $config = new FakeConfig();
+        $config = new Config();
         $stroke = new KeyStroke($config, self::ENCODING);
         $key = new Key($char, 'ed_insert', false);
         $bytes = self::bytesOf($char);

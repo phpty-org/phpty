@@ -40,24 +40,71 @@ once, rather than re-explained at each call site (per ADR-0005's consequences):
   manual offset walk yielding the same token stream.
 - **A trailing `?` on a predicate is dropped.** `editing_mode_is?` becomes
   `editing_mode_is`; `String#capitalize` etc. are ported as private helpers.
-- **Ambiguous width has no owner yet.** Upstream reads `Reline.ambiguous_width`,
-  measured once against the tty at startup. Tier 0 has no Core to run that probe,
-  so `Unicode::ambiguousWidth()` is a static default of 1; the Core will set it
-  via `setAmbiguousWidth()` when it lands.
+- **Ambiguous width is set by the Core probe.** Upstream reads
+  `Reline.ambiguous_width`, measured once against the tty at startup.
+  `Core::may_req_ambiguous_char_width` now runs that probe (write `▽`, read the
+  cursor column via DSR) and calls `Unicode::setAmbiguousWidth()`; on a dumb gate
+  or non-tty it defaults to 1, as upstream.
+- **The global `Reline::IOGate` becomes an injected gate.** Upstream selects one
+  IO gate into a module constant and every class reaches it through that global.
+  PHP has no clean constant-swap, and upstream's own render tests swap the
+  constant to a fake — so this port injects the `IO` gate into `Core` and
+  `LineEditor` (constructor) instead, and each `Reline::IOGate.foo` upstream is
+  `$this->io->foo`. Same seam, made explicit.
+- **`RenderedScreen` is an array, not a struct.** The `base_y`/`lines`/`cursor_y`
+  frame cache is a mutable associative array here rather than a Ruby Struct; the
+  cell-tuple row format (`[x, w, content]` triples, `null` for an absent overlay)
+  is unchanged.
+- **Deferred signals need ext-pcntl.** SIGWINCH/SIGCONT/SIGINT are trapped with
+  `pcntl_signal` (handlers only flip a flag; the read loop services them via
+  `handle_signal`), all guarded for pcntl's absence. Two tier-1 gaps, documented
+  at their call sites: SIGCONT does not re-assert raw mode (that needs a bare,
+  unscoped raw set Tty deliberately withholds per ADR-0016; the read loop's
+  `withRawMode` scope re-establishes it next iteration), and `handle_interrupted`
+  keeps the deferred-flag plumbing but does not re-raise Interrupt (SIGINT
+  semantics are not exercised by the tier-1 tests).
 
-## Current status: tier 0
+## Current status: tier 1
 
-The terminal-free foundation, headless-testable. Present:
+The minimal single-line editor, driven end-to-end on a real pty. Added on top of
+tier 0 (per [ADR-0017](../docs/adr/0017-renderer-ported-full-shape-exercised-by-tier.md)):
 
-- `Unicode` + `Unicode\EastAsianWidth` — grapheme width, ambiguous-width lookup,
-  escape-aware measuring, and the emacs/vi word-motion scanners.
-- `KeyStroke` — the byte-stream → key matcher (CSI/SS3 resolution, macro
-  expansion), ported against a minimal `ConfigInterface` (Config itself is a
-  later tier; a test double stands in).
-- `KeyActor\Base` / `Composite` / `Emacs` — the keymap trie and the Emacs table.
-- `Key` — the resolved-keypress struct.
+- `IO` + `IO\Ansi` + `IO\Dumb` — the full IO-gate contract
+  ([reline-io-contract.md](../docs/porting/reline-io-contract.md)): raw mode via
+  Tty, the DSR cursor-position probe with byte pushback, bracketed-paste
+  prep/deprep, screen size, cursor/erase/scroll emission (scroll as `"\n"`
+  repetition per ruby/reline#576), `getc` polling in 10ms slices servicing
+  deferred signals, and the LIFO `ungetc` buffer. Windows is out of scope.
+- `LineEditor` — buffer state (`@buffer_of_lines`, kept a list even though tier 1
+  has one line, so tier 2 widens without reshaping), the emacs single-line
+  command subset, and the **renderer ported in full shape** (ADR-0017):
+  `render` / `render_differential` / `render_line_differential` with the
+  cell-tuple rows, rendered-screen cache, and per-row then per-span diffing —
+  never a simplified single-row renderer. Overlay levels degenerate to
+  prompt-over-input with no dialogs/rprompt, exercising the same algorithm.
+- `Config` — the emacs-only tier-1 subset behind the real config.rb structure
+  (three layered keymaps per mode, keyseq_timeout, the mode/paste variables);
+  inputrc parsing lands inside it at tier 7. It replaces the tier-0
+  `tests/FakeConfig` double — the KeyStroke tests now drive the real `Config`.
+- `Core` + `Reline` — `readline(prompt)`, `inner_readline`, `read_io` with the
+  ESC/keyseq-timeout matching, and the ambiguous-width probe.
+- `KillRing` (+ `RingBuffer`/`RingPoint`), `CursorPos` — the pure kill-ring data
+  structure and the cursor-position value object.
 
-**No line editor, no rendering, no real terminal I/O yet.** Those are tier 1+.
+**Commands landed** (emacs, single-line): `ed_insert`, `ed_digit`,
+`ed_prev_char`, `ed_next_char`, `ed_move_to_beg`, `ed_move_to_end`,
+`em_delete_prev_char`, `ed_delete_prev_word`, `em_delete_next_word`,
+`em_next_word`/`ed_prev_word`, `em_delete` (C-d incl. EOF-on-empty), `key_delete`,
+`ed_kill_line`, `em_kill_line`, `ed_clear_screen`, `ed_transpose_chars`,
+`em_yank`/`em_yank_pop`, `insert_raw_char`, `ed_newline`/accept, plus
+`ed_ignore`/`ed_unassigned`.
+
+**History and vi are out** (tiers 3 and 5): unbound methods — arrow-up
+`ed_prev_history`, undo, completion, all `vi_*` — dispatch to nothing via
+`wrap_method_call`'s method-exists guard, the ed_unassigned-equivalent, so their
+keymap entries are harmless and track upstream. Multiline, wrapping/scrolling,
+completion dialogs, and rprompt are absent (tiers 2/4); the renderer branches
+that would drive them collapse to no-ops with their inputs empty.
 
 Scope deviations, all consistent with the unix/UTF-8-first milestone: non-UTF-8
 encodings are not ported (upstream's SJIS handling in `safe_encode`, and the
@@ -81,8 +128,23 @@ hand-edited; regenerate them with their committed generators:
 
 Pure-logic upstream tests are ported into `tests/` (`UnicodeTest`,
 `KeyStrokeTest`), keeping upstream method names and data. Table-integrity tests
-(`EastAsianWidthTest`, `EmacsMappingTest`) guard the generation step. Run the
-whole monorepo suite with
+(`EastAsianWidthTest`, `EmacsMappingTest`) guard the generation step. Tier 1 adds:
+
+- `RenderLineDifferentialTest` — the full-shape row-diff renderer, ported from
+  upstream's `RenderLineDifferentialTest` against an in-memory `LoggingIO`
+  (the TestIO analogue): dialog-overlay and multibyte cases pass unchanged.
+- `LineEditorEmacsTest` — the tier-1 subset of `test_key_actor_emacs.rb`, feeding
+  key bytes through `KeyStroke::expand` into `input_key` and asserting the buffer
+  split at the cursor (insertion incl. wide/combining, motion, backspace over
+  日本語, kill/yank, transpose, C-d EOF).
+- `KeyseqTimeoutTest` — `Core::read_io`'s ESC-vs-arrow disambiguation over a
+  scripted gate (`ScriptedIO`), no real waits.
+- `ReadlineScreenTest` — end-to-end `Reline::readline` on a pty via ScreenTest
+  (echo, cursor motion + reinsertion, backspace across a wide char, kill-to-end,
+  accept-line). The harness VTerm answers `\e[6n`, so the ANSI gate's DSR probes
+  complete and the real rendering path is exercised (not the Dumb fallback).
+
+Run the whole monorepo suite with
 `vendor-bin/phpunit/vendor/bin/phpunit --no-progress` from the repo root, inside
 `nix develop .#default`.
 

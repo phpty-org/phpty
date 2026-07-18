@@ -5,7 +5,14 @@
     "keywords": ["reline", "readline", "line-editor", "terminal", "unicode", "east-asian-width"],
     "require": {
         "php": "^7.4 || ^8.0",
-        "ext-mbstring": "*"
+        "ext-mbstring": "*",
+        "phpty/tty": "self.version"
+    },
+    "suggest": {
+        "ext-pcntl": "For SIGWINCH/SIGCONT/SIGINT handling during the read loop; without it those signals are not serviced",
+        "phpty/screen-test": "To drive Reline through a pty and assert on the rendered screen in tests",
+        "phpunit/phpunit": "To run the ported test suite",
+        "yoast/phpunit-polyfills": "For assertion compatibility across PHPUnit versions on PHP 7.4-8.x"
     },
     "autoload": {
         "psr-4": {
