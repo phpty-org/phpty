@@ -30,15 +30,26 @@ final class Session
         $this->waitMicroseconds = (int) ($wait * 1_000_000);
     }
 
+    /** Give a slow Subject up to this long to print its startup message. */
+    private const STARTUP_TIMEOUT_MICROSECONDS = 5_000_000;
+
     /**
      * Start a Subject on a Screen of the given size and settle its initial
      * output.
      *
-     * @param list<string> $command argv for the Subject; the first is the program
-     * @param float        $wait    seconds to let output arrive between reads
+     * @param list<string> $command        argv for the Subject; the first is the program
+     * @param float        $wait           seconds to let output go quiet before a Sync stops
+     * @param string|null  $startupMessage if set, block until the Subject's output
+     *                                     begins with it — so a REPL's banner has
+     *                                     appeared before any assertion runs
      */
-    public static function start(int $rows, int $cols, array $command, float $wait = 0.1): self
-    {
+    public static function start(
+        int $rows,
+        int $cols,
+        array $command,
+        float $wait = 0.1,
+        ?string $startupMessage = null
+    ): self {
         $session = new self(
             Pty::spawn($command, $rows, $cols),
             new VTerm($rows, $cols),
@@ -46,9 +57,42 @@ final class Session
             $cols,
             $wait,
         );
+        if ($startupMessage !== null && $startupMessage !== '') {
+            $session->awaitStartup($startupMessage);
+        }
         $session->sync();
 
         return $session;
+    }
+
+    /**
+     * Poll until the Subject's output begins with $marker, feeding it to the
+     * VTerm as it arrives. Bounded: a Subject that never prints the marker gives
+     * up rather than hanging, and the assertion that follows reports the empty
+     * Screen. This deliberately does not stop on a quiet gap the way sync() does
+     * — a banner printed after a pause is exactly what it waits through.
+     */
+    private function awaitStartup(string $marker): void
+    {
+        $accumulated = '';
+        $polls = \intdiv(self::STARTUP_TIMEOUT_MICROSECONDS, self::POLL_MICROSECONDS);
+
+        for ($i = 0; $i < $polls; $i++) {
+            $chunk = $this->pty->read();
+            if ($chunk === '') {
+                \usleep(self::POLL_MICROSECONDS);
+                continue;
+            }
+            $accumulated .= $chunk;
+            $this->vterm->write($chunk);
+            $responses = $this->vterm->takeResponses();
+            if ($responses !== '') {
+                $this->pty->write($responses);
+            }
+            if (\strpos($accumulated, $marker) === 0) {
+                return;
+            }
+        }
     }
 
     /** Send input to the Subject, then settle whatever it emits in response. */

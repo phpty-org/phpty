@@ -71,6 +71,29 @@ final class SessionTest extends TestCase
         $this->assertStringContainsString('xy', $session->render()[0]);
     }
 
+    public function testOutputBeyondTheBottomScrolls(): void
+    {
+        // Four lines into a two-row Screen: the first two scroll off the top.
+        $session = $this->start(2, 10, ['/bin/sh', '-c', "printf 'a\nb\nc\nd'"]);
+
+        $this->assertSame(['c', 'd'], $session->render());
+    }
+
+    public function testWaitsForTheStartupMessage(): void
+    {
+        // The Subject pauses, prints a banner, then idles. Without a startup
+        // message, start()'s Sync would return during the pause and miss it.
+        $session = $this->sessions[] = Session::start(
+            3,
+            20,
+            ['/bin/sh', '-c', 'sleep 0.3; printf "READY> "; cat'],
+            0.1,
+            'READY>',
+        );
+
+        $this->assertStringContainsString('READY>', $session->render()[0]);
+    }
+
     public function testWritesQueryRepliesBackToTheSubject(): void
     {
         $bash = $this->findBash();
