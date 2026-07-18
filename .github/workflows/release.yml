@@ -2,7 +2,8 @@ name: Release
 
 # Manual, and it PUBLISHES. It downgrades the tree to PHP 7.4, verifies it on a
 # real 7.4, then force-updates the read-only split repositories
-# (phpty-org/{vterm,pty,screen-test}) with that code and the given tag — the same
+# (phpty-org/{vterm,pty,screen-test,tty,reline}) with that code and the given
+# tag — the same
 # tag on every module (lockstep, ADR-0009). Finally it tags the monorepo itself,
 # at the source commit, for provenance.
 #
@@ -89,13 +90,13 @@ jobs:
       #
       # The working tree here is the DOWNGRADED tree, already committed locally by
       # the previous step, so copying from it is correct.
-      - name: split → phpty-org/{vterm,pty,screen-test}
+      - name: split → phpty-org/{vterm,pty,screen-test,tty,reline}
         env:
           SPLIT_TOKEN: ${{ secrets.SPLIT_TOKEN }}
           TAG: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
-          for pkg in vterm pty screen-test; do
+          for pkg in vterm pty screen-test tty reline; do
             # Fresh clone of the split target. It already has a main branch (only a
             # .split-init placeholder commit), which the force-push below replaces.
             dir="$(mktemp -d)"

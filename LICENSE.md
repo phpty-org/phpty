@@ -19,8 +19,9 @@ into its own repository.
 Reline is the one exception, and it cannot be brought under MPL-2.0. Upstream
 reline declares `license = 'Ruby'`, a dual Ruby-licence/2-clause-BSDL grant, and
 it vendors rb-readline under a BSD licence. A port is a derivative work, so both
-notices carry through: if reline is ever ported here it keeps its upstream terms
-rather than PhPty's MPL-2.0.
+notices carry through: `reline/` keeps those upstream terms rather than PhPty's
+MPL-2.0, carrying upstream's `COPYING`, `BSDL`, and `license_of_rb-readline`
+verbatim.
 
 Despite its name, `vterm/` is not derived from vterm-gem: that gem binds
 libvterm, and `vterm/` binds libghostty-vt, so no aycabta code or design remains

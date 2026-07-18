@@ -27,7 +27,7 @@ v0.1.1. The second is the Reline port
 
 - **ScreenTest → Pty**: ScreenTest starts the Subject on a Pty and holds the Controller end
 - **ScreenTest → VTerm**: ScreenTest feeds bytes read from the Controller into a VTerm, then asserts on its Screen
-- **Reline → Tty**: Reline would be the only runtime consumer of Tty; Tty exists to serve it, and waits on it
+- **Reline → Tty**: Reline is the only runtime consumer of Tty; its Ansi gate enters Raw mode and reads Winsize through it
 - **Pty ↔ Tty**: no dependency. Both bind libc through FFI, but they share no code until there is real duplication to remove
 
 ## Project-wide language

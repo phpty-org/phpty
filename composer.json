@@ -11,7 +11,9 @@
     },
     "replace": {
         "phpty/pty": "self.version",
+        "phpty/reline": "self.version",
         "phpty/screen-test": "self.version",
+        "phpty/tty": "self.version",
         "phpty/vterm": "self.version"
     },
     "autoload": {
