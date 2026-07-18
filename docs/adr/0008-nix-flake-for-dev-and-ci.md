@@ -8,9 +8,10 @@ in-flux dependency and reproducing its build is precisely what a flake input is
 for, and Ghostty's own `flake.nix` already exposes `libghostty-vt` as a package
 and an overlay — so the whole cost collapses into one input.
 
-Everything else was verified present before deciding: nixpkgs carries PHP 8.1
-through 8.5, its PHP extension set includes `ffi` along with `posix`, `pcntl`,
-`mbstring`, `intl` and `sockets`, and its `zig` is 0.15.2 — the same version
+Everything else was verified present before deciding: nixpkgs carries PHP 8.2
+through 8.5 (8.1 has since gone EOL and nixpkgs refuses it), its PHP extension
+set includes `ffi` along with `posix`, `pcntl`, `mbstring`, `intl` and
+`sockets`, and its `zig` is 0.15.2 — the same version
 Ghostty pins through zig-overlay.
 
 CI uses the same flake as the devShell rather than `setup-php` plus a hand-rolled
@@ -41,14 +42,16 @@ is a lie on some platform.
 
 ## Consequences
 
-- **PHP 7.4 and 8.0 are unavailable.** nixpkgs ships 8.1 upward, and both are long
-  EOL. Development is unaffected — every module is *written* in modern PHP
-  ([ADR-0003](./0003-php-version-uniform-dev-modern-ship-74.md)) and the flake
-  covers 8.1–8.5. But every module is *shipped* as 7.4, and that artifact must be
-  tested on a real 7.4. This ADR named the escape as hypothetical; it is now taken
-  ([ADR-0009](./0009-downgrade-on-release-with-rector.md)): the release pipeline's
-  7.4 validation leg uses `setup-php`, outside the flake. The flake is development
-  truth; setup-php is the ship inspection.
+- **The dev floor rises as nixpkgs drops EOL PHP; the ship floor does not.**
+  7.4 and 8.0 were never in nixpkgs; 8.1 went EOL and nixpkgs now refuses it, which
+  first surfaced as a red CI job. So development is on 8.2–8.5 today and will climb
+  as 8.2 ages out. None of this touches what we *ship*: every module is written in
+  modern PHP ([ADR-0003](./0003-php-version-uniform-dev-modern-ship-74.md)) and
+  shipped as 7.4. That 7.4 artifact must still be tested on a real 7.4, which
+  nixpkgs cannot give us; the escape this ADR once named as hypothetical is now
+  taken ([ADR-0009](./0009-downgrade-on-release-with-rector.md)): the release
+  pipeline's 7.4 validation leg uses `setup-php`, outside the flake. The flake is
+  development truth; setup-php is the ship inspection.
 - Contributors need Nix. The floor was already higher than that — without it they
   need Zig and a source build — but it is still a PHP project asking for a tool
   most PHP developers do not have.

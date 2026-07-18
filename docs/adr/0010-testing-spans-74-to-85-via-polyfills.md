@@ -14,8 +14,9 @@ PHPUnit's own.
 `yoast/phpunit-polyfills` 4.0 supports PHPUnit `^7.5 || ^8 || ^9 || ^11 || ^12` —
 it **skips 10 and, so far, 13**. So the test PHPUnit is constrained to
 `^9.6 || ^11.0 || ^12.0`, deliberately excluding 10 and 13 even though both
-exist (13.2 needs PHP ≥ 8.4.1). Composer then picks per platform: 7.4 → 9,
-8.1 → 9, 8.2 → 11, 8.3–8.5 → 12. Verified by running the suite in the dev shell —
+exist (13.2 needs PHP ≥ 8.4.1). Composer then picks per platform: 7.4 → 9 (the
+release leg), 8.2 → 11, 8.3–8.5 → 12. Verified by running the suite in the dev
+shell —
 PHP 8.4 resolved PHPUnit 12.5.31 with polyfills 4.0.0 and the harness went green.
 
 ## PHPUnit lives in an isolated bin package, not in any `composer.json` require

@@ -17,7 +17,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         # ADR-0003: the first-milestone modules target modern PHP.
         # ADR-0008: nixpkgs has no 7.4 or 8.0, which does not bite yet.
-        php: [php81, php82, php83, php84, php85]
+        php: [php82, php83, php84, php85]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,7 +63,7 @@ jobs:
       # Run the real suite on every matrix PHP. This exercises the FFI binding
       # against libghostty on each version, and the PHPUnit-Polyfills span
       # (ADR-0010): the pinned bin lock is PHPUnit 12 (8.3+), so re-resolve per
-      # PHP — 8.1 gets 9, 8.4 gets 12 — and let the polyfills bridge them.
+      # PHP — 8.2 gets 11, 8.4 gets 12 — and let the polyfills bridge them.
       #
       # `timeout` bounds a hang: the screen-test suite drives real subjects on
       # ptys, so a stuck Subject must fail the job in minutes, not sit until the

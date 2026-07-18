@@ -1,9 +1,9 @@
 # PHP version is uniform: develop on modern PHP, ship PHP 7.4
 
-Every module is developed on modern PHP — 8.1+, the nixpkgs floor
+Every module is developed on modern PHP — 8.2+, the nixpkgs floor
 ([ADR-0008](./0008-nix-flake-for-dev-and-ci.md)) — and distributed as PHP 7.4,
 downgraded by Rector at release ([ADR-0009](./0009-downgrade-on-release-with-rector.md)).
-The floor does not vary between modules. Two levels, one of each: 8.1+ to write,
+The floor does not vary between modules. Two levels, one of each: 8.2+ to write,
 7.4 to ship.
 
 7.4 is PsySH's floor (`^8.0 || ^7.4`), and PsySH is the reason every module
@@ -23,7 +23,7 @@ nothing about ScreenTest's *installability*. ScreenTest is a test framework — 
 `require-dev` of the projects that use it, exactly as yamatanooroti is a dev
 dependency of reline and irb. If PsySH is to use ScreenTest in its own suite,
 Composer must resolve ScreenTest on PsySH's 7.4 CI leg — and a package requiring
-`^8.1` cannot be installed there. So ScreenTest must reach 7.4, and because it
+`^8.2` cannot be installed there. So ScreenTest must reach 7.4, and because it
 depends on VTerm and Pty, they must too. With Tty and Reline already at 7.4, the
 floor collapses to a single value.
 
@@ -32,7 +32,7 @@ modern PHP, enums and all. Only the shipped artifact is 7.4.
 
 ## Consequences
 
-- **Development runs on 8.1+, tests of the shipped artifact run on 7.4.** Unit
+- **Development runs on 8.2+, tests of the shipped artifact run on 7.4.** Unit
   tests execute under the nixpkgs PHP; the downgraded 7.4 build is exercised in a
   dedicated release leg on `setup-php`
   ([ADR-0009](./0009-downgrade-on-release-with-rector.md)).

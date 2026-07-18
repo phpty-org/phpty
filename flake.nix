@@ -56,7 +56,6 @@
           # nixpkgs has no 7.4/8.0; the shipped floor is validated at release on
           # setup-php (ADR-0008, ADR-0009).
           default = mkShell (withFfi pkgs.php84);
-          php81 = mkShell (withFfi pkgs.php81);
           php82 = mkShell (withFfi pkgs.php82);
           php83 = mkShell (withFfi pkgs.php83);
           php84 = mkShell (withFfi pkgs.php84);

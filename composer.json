@@ -3,7 +3,7 @@
     "description": "PhPty development monorepo. Not a distributable package; the modules are split out and released individually.",
     "type": "project",
     "require": {
-        "php": "^8.1",
+        "php": "^8.2",
         "ext-ffi": "*"
     },
     "require-dev": {
