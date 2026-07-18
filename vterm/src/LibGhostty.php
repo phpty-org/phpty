@@ -26,20 +26,20 @@ final class LibGhostty
             size_t max_scrollback;
         } GhosttyTerminalOptions;
 
-        // The header declares value as a union { GhosttyPointCoordinate; uint64_t[2]; }.
-        // PHP 7.4's FFI cannot pass a struct containing a union by value — it is
-        // what breaks ghostty_terminal_grid_ref there. We only ever use the
-        // coordinate variant, so value is declared as an ABI-equivalent struct
-        // (16 bytes, same layout) with no union. See VTerm::cellAt.
-        typedef struct {
-            uint16_t x;
-            uint32_t y;
-            uint64_t _reserved;
-        } GhosttyPointValue;
-
+        // The header declares GhosttyPoint as { tag; union value; }. PHP 7.4's FFI
+        // cannot pass a struct containing a nested struct or union by value — it
+        // is what breaks ghostty_terminal_grid_ref there, while the flat
+        // GhosttyTerminalOptions passes fine. So GhosttyPoint is flattened to a
+        // single level with the same ABI (tag at 0, x at 8, y at 12, 24 bytes),
+        // and the coordinate — the only variant we use — inlined. See
+        // VTerm::cellAt and docs/adr/0014-*.
         typedef struct {
             GhosttyPointTag tag;
-            GhosttyPointValue value;
+            uint32_t _pad0;
+            uint16_t x;
+            uint16_t _pad1;
+            uint32_t y;
+            uint64_t _reserved;
         } GhosttyPoint;
 
         typedef struct {
