@@ -18,6 +18,12 @@ CI uses the same flake as the devShell rather than `setup-php` plus a hand-rolle
 Zig step. Two definitions would drift, and the thing they would drift on is the
 libghostty-vt commit — the exact failure Nix is here to prevent.
 
+**Revised in [ADR-0013](./0013-hybrid-ci-setup-php-plus-nix-libghostty.md).** CI's
+matrix now takes PHP from setup-php and only libghostty from the flake — after
+this all-flake CI proved slow and unable to run EOL PHP. The drift objection
+above still holds for the *library*, and that is exactly what the revision keeps
+on nix; only the interpreter moves to setup-php.
+
 ## Why this matters more than usual here
 
 This project's claim is that you cannot know what a terminal renders without

@@ -4,46 +4,74 @@ on:
   push:
   pull_request:
 
-# ADR-0008: CI uses the same flake as the devShell. There is deliberately no
-# setup-php here — two definitions would drift, and they would drift on the
-# libghostty-vt commit.
+# Hybrid CI (ADR-0013): PHP comes from setup-php — fast, and every version
+# including the ones nixpkgs refuses as EOL — while libghostty-vt still comes
+# from the flake, built once per OS and shared as an artifact. The drift ADR-0008
+# feared does not return: both dev and CI get the library from the same
+# `nix build .#libghostty-vt`, pinned by flake.lock. `nix develop` stays the dev
+# shell.
 jobs:
-  devshell:
-    name: ${{ matrix.php }} on ${{ matrix.os }}
+  libghostty:
+    name: build libghostty-vt / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # ADR-0003: the first-milestone modules target modern PHP.
-        # ADR-0008: nixpkgs has no 7.4 or 8.0, which does not bite yet.
-        php: [php82, php83, php84, php85]
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - uses: cachix/install-nix-action@v30
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # No binary cache is configured yet, so every job builds libghostty-vt from
-      # source. ADR-0008 accepts this cost; it is the first thing to fix if CI
-      # becomes painful.
-      - name: PHP has FFI
+      # The one slow, nix-built thing — done once per OS, not once per PHP.
+      # cp -L dereferences the store symlinks so the artifact is plain files.
+      - name: build and stage the pinned library
         run: |
-          nix develop .#${{ matrix.php }} --command php -r '
-            if (!extension_loaded("FFI")) { fwrite(STDERR, "FFI missing\n"); exit(1); }
-            echo "PHP ", PHP_VERSION, " with FFI\n";
-          '
+          nix build .#libghostty-vt
+          mkdir -p libghostty-lib
+          cp -RL result/lib/. libghostty-lib/
 
-      # The ADR-0002 claim, checked on every push: PHP can dlopen libghostty-vt,
-      # and it measures width the way the ADRs say it does. If this fails, the
-      # pinned libghostty-vt moved under us.
-      - name: PHP can call libghostty-vt over FFI
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libghostty-${{ matrix.os }}
+          path: libghostty-lib
+          retention-days: 1
+
+  test:
+    name: PHP ${{ matrix.php }} on ${{ matrix.os }}
+    needs: libghostty
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # The modern source's floor is 8.2 (ADR-0003); nixpkgs would cap us there
+        # too, but setup-php lets us cover the whole range at speed.
+        php: ['8.2', '8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: libghostty-${{ matrix.os }}
+          path: libghostty-lib
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: ffi, mbstring, pcntl, posix
+          coverage: none
+          tools: composer
+
+      # The ADR-0002 claim, checked on every push against the pinned library: PHP
+      # can dlopen it and it measures width the way the ADRs say.
+      - name: libghostty-vt loads and measures width
         run: |
-          nix develop .#${{ matrix.php }} --command php -r '
+          export PHPTY_LIBGHOSTTY_VT="$PWD/libghostty-lib"
+          php -r '
             $ext = PHP_OS_FAMILY === "Darwin" ? "dylib" : "so";
             $ffi = FFI::cdef(
               "uint8_t ghostty_unicode_codepoint_width(uint32_t cp);",
@@ -51,31 +79,23 @@ jobs:
             );
             $expected = [0x0061 => 1, 0x65E5 => 2, 0x3042 => 2, 0xFF21 => 2, 0x2192 => 1];
             foreach ($expected as $cp => $want) {
-              $got = $ffi->ghostty_unicode_codepoint_width($cp);
-              if ($got !== $want) {
-                fwrite(STDERR, sprintf("U+%04X: expected %d, got %d\n", $cp, $want, $got));
+              if ($ffi->ghostty_unicode_codepoint_width($cp) !== $want) {
+                fwrite(STDERR, sprintf("U+%04X: expected %d\n", $cp, $want));
                 exit(1);
               }
             }
             echo "libghostty-vt width table matches the ADRs\n";
           '
 
-      # Run the real suite on every matrix PHP. This exercises the FFI binding
-      # against libghostty on each version, and the PHPUnit-Polyfills span
-      # (ADR-0010): the pinned bin lock is PHPUnit 12 (8.3+), so re-resolve per
-      # PHP — 8.2 gets 11, 8.4 gets 12 — and let the polyfills bridge them.
-      #
-      # `timeout` bounds a hang: the screen-test suite drives real subjects on
-      # ptys, so a stuck Subject must fail the job in minutes, not sit until the
-      # runner's own limit.
+      # The PHPUnit-Polyfills span (ADR-0010): the pinned bin lock is PHPUnit 12
+      # (8.3+), so re-resolve per PHP — 8.2 gets 11, 8.4 gets 12 — and let the
+      # polyfills bridge them. `timeout` bounds a stuck Subject on a pty.
       - name: test suite
         run: |
-          nix develop .#${{ matrix.php }} --command bash -c '
-            set -e
-            composer install --no-interaction
-            composer bin phpunit update --no-interaction --no-audit
-            timeout 300 vendor-bin/phpunit/vendor/bin/phpunit
-          '
+          export PHPTY_LIBGHOSTTY_VT="$PWD/libghostty-lib"
+          composer install --no-interaction
+          composer bin phpunit update --no-interaction --no-audit
+          timeout 300 vendor-bin/phpunit/vendor/bin/phpunit
 
   module-deps:
     name: prefer-lowest / ${{ matrix.module }}
@@ -86,57 +106,54 @@ jobs:
         module: [vterm, pty, screen-test]
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - uses: cachix/install-nix-action@v30
+      - uses: shivammathur/setup-php@v2
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+          php-version: '8.2'
+          # Present so composer's platform check passes; the module requires them,
+          # even though resolution runs no FFI.
+          extensions: ffi, mbstring, pcntl, posix
+          coverage: none
+          tools: composer
 
       # Each module is a standalone package; this checks it validates and resolves
-      # at the LOWEST versions of its dependencies. Keeping the test tools in
-      # isolated bin packages (ADR-0010) is what keeps this resolution a clean
-      # measurement of the library, not of PHPUnit's tree.
-      #
-      # Sibling modules are not on Packagist yet (publication is deferred), so they
-      # are linked by path. Every module sits on the same untagged branch, so
-      # `self.version` resolves them all to dev-main — no branch alias needed. The
-      # path repos are injected here only, never in the shipped composer.json.
-      - name: validate and resolve at floor (${{ matrix.module }})
+      # at the LOWEST versions of its dependencies — no libghostty needed, so no
+      # nix. Siblings are not on Packagist yet (publication deferred), so they are
+      # linked by path; every module shares one untagged branch, so `self.version`
+      # resolves to dev-main with no branch alias. The path repos are injected here
+      # only, never in the shipped composer.json.
+      - name: validate and resolve at floor
         run: |
-          nix develop .#default --command bash -c '
-            set -e
-            cd ${{ matrix.module }}
-            composer validate --strict --no-check-publish --no-check-lock
-            for sib in vterm pty screen-test; do
-              [ "$sib" = "${{ matrix.module }}" ] && continue
-              composer config repositories."$sib" path ../"$sib"
-            done
-            composer update --prefer-lowest --prefer-stable
-          '
+          set -e
+          cd ${{ matrix.module }}
+          composer validate --strict --no-check-publish --no-check-lock
+          for sib in vterm pty screen-test; do
+            [ "$sib" = "${{ matrix.module }}" ] && continue
+            composer config repositories."$sib" path ../"$sib"
+          done
+          composer update --prefer-lowest --prefer-stable
 
   downgrade:
     name: downgrade to PHP 7.4 applies cleanly
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - uses: cachix/install-nix-action@v30
+      - uses: shivammathur/setup-php@v2
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+          php-version: '8.4'
+          # The root package requires ext-ffi, so composer install checks for it.
+          extensions: ffi
+          coverage: none
+          tools: composer
 
       # Guards the release downgrade config (ADR-0009): the modern source must stay
-      # lowerable to 7.4 without Rector erroring — this is what would have caught
-      # the MHASH_XXH32 rule crash. It applies the downgrade to the ephemeral
-      # checkout; the real 7.4 *runtime* test happens at release, on setup-php.
+      # lowerable to 7.4 without Rector erroring — this is what caught the
+      # MHASH_XXH32 rule crash. Rector transforms source only, so no libghostty and
+      # no nix. `composer install` first, so the bin-plugin exists before `bin`.
       - name: rector downgrade applies without error
         run: |
-          nix develop .#default --command bash -c '
-            set -e
-            composer bin rector install
-            vendor-bin/rector/vendor/bin/rector process --config build/rector-downgrade.php --no-progress-bar
-          '
+          set -e
+          composer install --no-interaction
+          composer bin rector install --no-interaction
+          vendor-bin/rector/vendor/bin/rector process --config build/rector-downgrade.php --no-progress-bar
