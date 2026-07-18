@@ -71,6 +71,22 @@ final class UnicodeTest extends TestCase
         $this->assertSame(["ab\e]0;1\x07c", "\e]0;1\x07d"], Unicode::split_line_by_width("ab\e]0;1\x07cd", 3));
     }
 
+    public function testSplitLineByWidthEdgeCases(): void
+    {
+        // Empty input still yields one (empty) line — the seed line.
+        $this->assertSame([''], Unicode::split_line_by_width('', 3));
+        // Exact fit: the trailing "" marks the cursor moving to the next line.
+        $this->assertSame(['abc', ''], Unicode::split_line_by_width('abc', 3));
+        // Under the limit: a single line, no wrap.
+        $this->assertSame(['ab'], Unicode::split_line_by_width('ab', 3));
+        // A wide char refuses to straddle the boundary — it moves whole to the
+        // next line rather than tearing across it (日 would land at cols 3-4).
+        $this->assertSame(['abc', '日e'], Unicode::split_line_by_width('abc日e', 4));
+        $this->assertSame(['ab', '日'], Unicode::split_line_by_width('ab日', 3));
+        // A non-zero offset counts against the first line's budget.
+        $this->assertSame(['a', 'bcd', 'e'], Unicode::split_line_by_width('abcde', 3, 2));
+    }
+
     public function testSplitLineByWidthCsiResetSgrOptimization(): void
     {
         $this->assertSame(["\e[1ma\e[mb\e[2mc", "\e[2md\e[0me\e[3mf", "\e[3mg"], Unicode::split_line_by_width("\e[1ma\e[mb\e[2mcd\e[0me\e[3mfg", 3));

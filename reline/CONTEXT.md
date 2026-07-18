@@ -64,7 +64,55 @@ once, rather than re-explained at each call site (per ADR-0005's consequences):
   keeps the deferred-flag plumbing but does not re-raise Interrupt (SIGINT
   semantics are not exercised by the tier-1 tests).
 
-## Current status: tier 1
+## Current status: tier 2
+
+The multiline editor over the wrapping/scrolling renderer. Tier 1 already landed
+the renderer in full upstream shape (ADR-0017) with the wrap and scroll *inputs*
+present but undriven; tier 2 is the promised widening — it turns those inputs on
+and ports the multiline buffer commands, reshaping nothing.
+
+- **Wrapping and scrolling are now driven, not rewritten.**
+  `wrapped_prompt_and_input_lines` / `split_line_by_width` (display-width wrap,
+  wide chars refusing to straddle the right edge) and the
+  `render_differential` scroll branch (`base_y` + `scroll_down` when content
+  exceeds `screen_height`) were ported at tier 1; tier 2 simply feeds them a
+  multi-line `@buffer_of_lines`. Vertical scroll is driven by `scroll_into_view`
+  (advancing `@scroll_partial_screen` to keep the wrapped cursor visible) plus
+  that `render_differential` `base_y` branch — both already present. **Divergence
+  from the tier plan:** `upper_space_height`/`rest_height` (reline-architecture-map
+  §4 lists them as scroll inputs) are in fact dialog geometry
+  (`line_editor.rb:638,764`), consumed only by `dialog_range`; they belong to
+  tier 4 and are deferred, not needed to drive scroll.
+- **Multiline buffer commands, upstream bodies filled in:** `key_newline` +
+  `insert_new_line` (split the line at the cursor), `insert_multiline_text` (the
+  bracketed-paste target Core already routes to, CRLF-normalised), `ed_newline`
+  widened to the emacs multiline accept path, `delete_text()` widened to the
+  multi-line-buffer branches. `em_delete` (join at EOL), `em_delete_prev_char`
+  (join at BOL), `ed_kill_line` (join), and `ed_next_char`/`ed_prev_char` (cross
+  lines) already carried their multiline branches from tier 1 and are unchanged.
+- **Cross-line vertical motion.** The tier brief names `ed_prev_line`/
+  `ed_next_line`, but gem 0.6.3 has no such methods: up/down within a multiline
+  buffer is the leading branch of `ed_prev_history`/`ed_next_history`
+  (`line_editor.rb:1629,1646`) — move `@line_index`, keep the display column via
+  `calculate_nearest_cursor`. Those two are ported with that branch live; the
+  `move_history` fall-through is tier 3 and left a guarded no-op, exactly as the
+  unbound history commands were in tier 1 (follow-the-diff, ADR-0015).
+- **Multiline accept.** `confirm_multiline_termination` calls the caller's proc
+  with the whole buffer plus a trailing newline (`line_editor.rb:1189`);
+  `Core::readmultiline` mirrors `Reline#readmultiline` (reline.rb:250) — requires
+  the confirm block, sets it on the editor, returns `whole_buffer`, or nil on C-d
+  EOF. `Reline::readmultiline(prompt, confirm)` is the facade.
+- **Dynamic prompt landed.** `prompt_proc` fell out naturally in
+  `check_multiline_prompt` (its multiline branch), so it is ported: an unset proc
+  gives `[prompt] * buffer.size`; a set proc maps the buffer to per-line prompts
+  with the buffer-size padding. `auto_indent_proc`, `rprompt`, and dialogs remain
+  tier 4+.
+
+Still out (tiers 3-7): history store and navigation (`move_history`,
+`Reline::HISTORY`), completion/dialogs, rprompt, `auto_indent_proc`, vi mode. The
+renderer's rprompt/menu/dialog rows stay empty, as at tier 1.
+
+## Earlier status: tier 1
 
 The minimal single-line editor, driven end-to-end on a real pty. Added on top of
 tier 0 (per [ADR-0017](../docs/adr/0017-renderer-ported-full-shape-exercised-by-tier.md)):
@@ -103,8 +151,9 @@ tier 0 (per [ADR-0017](../docs/adr/0017-renderer-ported-full-shape-exercised-by-
 `ed_prev_history`, undo, completion, all `vi_*` — dispatch to nothing via
 `wrap_method_call`'s method-exists guard, the ed_unassigned-equivalent, so their
 keymap entries are harmless and track upstream. Multiline, wrapping/scrolling,
-completion dialogs, and rprompt are absent (tiers 2/4); the renderer branches
-that would drive them collapse to no-ops with their inputs empty.
+completion dialogs, and rprompt were absent at tier 1 (tiers 2/4); the renderer
+branches that would drive them collapsed to no-ops with their inputs empty.
+Wrapping/scrolling/multiline are now driven — see the tier-2 status above.
 
 Scope deviations, all consistent with the unix/UTF-8-first milestone: non-UTF-8
 encodings are not ported (upstream's SJIS handling in `safe_encode`, and the
@@ -143,6 +192,21 @@ Pure-logic upstream tests are ported into `tests/` (`UnicodeTest`,
   (echo, cursor motion + reinsertion, backspace across a wide char, kill-to-end,
   accept-line). The harness VTerm answers `\e[6n`, so the ANSI gate's DSR probes
   complete and the real rendering path is exercised (not the Dumb fallback).
+
+Tier 2 adds:
+
+- `LineEditorMultilineTest` — the multiline subset of `test_key_actor_emacs.rb`:
+  `\n` splitting the buffer, the `confirm_multiline_termination` accept gate,
+  cross-line vertical motion, line joins at BOL/EOL, and the bracketed-paste
+  `insert_multiline_text` (incl. CRLF normalisation).
+- `UnicodeTest::testSplitLineByWidthEdgeCases` — `split_line_by_width` on empty
+  input, exact fit, under-fit, a wide char refusing to straddle the boundary, and
+  a non-zero offset.
+- `ReadlineScreenTest` (tier-2 cases) — long input wrapping with a backspace
+  across the wrap boundary, a wide char (`日本語`) moving whole to the next row,
+  `Reline::readmultiline` over a heredoc-style confirm proc (via
+  `subjects/readmultiline_subject.php`) showing both rows then accepting, and an
+  8-line buffer scrolling a 6-row screen so the top scrolls off.
 
 Run the whole monorepo suite with
 `vendor-bin/phpunit/vendor/bin/phpunit --no-progress` from the repo root, inside

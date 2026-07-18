@@ -60,6 +60,19 @@ final class ReadlineScreenTest extends TestCase
         );
     }
 
+    private function startReadmultiline(int $rows = 6, int $cols = 30): Session
+    {
+        $subject = __DIR__ . '/subjects/readmultiline_subject.php';
+
+        return $this->sessions[] = Session::start(
+            $rows,
+            $cols,
+            [\PHP_BINARY, $subject],
+            0.1,
+            'ml>',
+        );
+    }
+
     public function testPromptRendersAtStartup(): void
     {
         $session = $this->startReadline();
@@ -116,5 +129,62 @@ final class ReadlineScreenTest extends TestCase
         // value readline returned.
         $rendered = \implode("\n", $session->render());
         $this->assertStringContainsString('GOT[hello]', $rendered);
+    }
+
+    // --- Tier 2: wrapping, multiline, scrolling ----------------------------
+
+    public function testLongInputWrapsAndBackspaceCrossesTheBoundary(): void
+    {
+        // cols=20, prompt "prompt> " is 8 wide, so 12 input columns fit on row 0.
+        $session = $this->startReadline(4, 20);
+        $session->write('abcdefghijklmno'); // 15 chars: 12 on row 0, 3 wrap to row 1
+
+        $this->assertSame('prompt> abcdefghijkl', $session->render()[0]);
+        $this->assertSame('mno', $session->render()[1]);
+
+        // Backspace deletes the first wrapped char; the wrap boundary re-renders.
+        $session->write("\x7f");
+        $this->assertSame('prompt> abcdefghijkl', $session->render()[0]);
+        $this->assertSame('mn', $session->render()[1]);
+    }
+
+    public function testWideCharWrapMovesWholeCharToNextRow(): void
+    {
+        // cols=12, prompt 8 wide -> 4 input columns on row 0. 日本 fills them (2+2);
+        // 語 would straddle the right edge, so it moves whole to the next row.
+        $session = $this->startReadline(4, 12);
+        $session->write('日本語');
+
+        $this->assertSame('prompt> 日本', $session->render()[0]);
+        $this->assertSame('語', $session->render()[1]);
+    }
+
+    public function testReadmultilineShowsBothRowsAndAcceptsOnTerminator(): void
+    {
+        $session = $this->startReadmultiline(6, 30);
+        $session->write("hello\n"); // first line; confirm proc declines, so it splits
+
+        $this->assertSame('ml> hello', $session->render()[0]);
+        $this->assertSame('ml>', $session->render()[1]);
+
+        $session->write("EOF\n"); // terminator line: confirm proc accepts
+
+        $rendered = \implode("\n", $session->render());
+        $this->assertStringContainsString('GOT[hello|EOF]', $rendered);
+    }
+
+    public function testTallBufferScrollsAShortScreen(): void
+    {
+        // rows=6: an 8-line buffer is taller than the screen, so the top scrolls
+        // off and the window follows the cursor on the last line.
+        $session = $this->startReadmultiline(6, 30);
+        $session->write("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8");
+
+        $rendered = $session->render();
+        // The cursor sits on l8, so the visible window ends there and l1/l2 are gone.
+        $this->assertSame('ml> l8', $rendered[5]);
+        $this->assertStringContainsString('ml> l3', \implode("\n", $rendered));
+        $this->assertStringNotContainsString('l1', \implode("\n", $rendered));
+        $this->assertStringNotContainsString('l2', \implode("\n", $rendered));
     }
 }

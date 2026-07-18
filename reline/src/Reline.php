@@ -32,6 +32,18 @@ final class Reline
         return self::core()->readline($prompt);
     }
 
+    /**
+     * Read a multiline buffer, delegating the completion decision to $confirm.
+     * Mirrors Reline.readmultiline: the block is required and receives the whole
+     * buffer with a trailing newline.
+     *
+     * @param callable(string): bool $confirm
+     */
+    public static function readmultiline(string $prompt, callable $confirm): ?string
+    {
+        return self::core()->readmultiline($prompt, $confirm);
+    }
+
     public static function get_screen_size(): array
     {
         return self::core()->get_screen_size();

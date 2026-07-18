@@ -82,7 +82,7 @@ final class Core
     public function readline(string $prompt = ''): ?string
     {
         $this->io->with_raw_input(function () use ($prompt): void {
-            $this->inner_readline($prompt);
+            $this->inner_readline($prompt, false, null);
         });
 
         $line = $this->line_editor->line();
@@ -93,7 +93,34 @@ final class Core
         return $line;
     }
 
-    private function inner_readline(string $prompt): void
+    /**
+     * The multiline entry point, ported from Reline#readmultiline (reline.rb:250).
+     * The block decides when the buffer is complete: it is handed the whole buffer
+     * with a trailing newline and returns whether to accept. Returns null when the
+     * read is aborted by C-d on an empty buffer.
+     *
+     * @param callable(string): bool $confirm_multiline_termination
+     */
+    public function readmultiline(string $prompt, callable $confirm_multiline_termination): ?string
+    {
+        $this->io->with_raw_input(function () use ($prompt, $confirm_multiline_termination): void {
+            $this->inner_readline($prompt, true, $confirm_multiline_termination);
+        });
+
+        $whole_buffer = $this->line_editor->whole_buffer();
+        if ($this->line_editor->eof()) {
+            $this->line_editor->reset_line();
+
+            return null;
+        }
+
+        return $whole_buffer;
+    }
+
+    /**
+     * @param (callable(string): bool)|null $confirm_multiline_termination
+     */
+    private function inner_readline(string $prompt, bool $multiline, ?callable $confirm_multiline_termination): void
     {
         if (!$this->config->test_mode() && !$this->config->loaded()) {
             $this->config->read();
@@ -104,7 +131,16 @@ final class Core
         $this->may_req_ambiguous_char_width();
         $this->key_stroke->encoding = $this->io->encoding();
         $this->line_editor->reset($prompt);
-        $this->line_editor->multiline_off();
+        if ($multiline) {
+            $this->line_editor->multiline_on();
+            if ($confirm_multiline_termination !== null) {
+                $this->line_editor->set_confirm_multiline_termination_proc($confirm_multiline_termination);
+            }
+        } else {
+            $this->line_editor->multiline_off();
+        }
+        // prompt_proc / auto_indent_proc / rprompt wiring (reline.rb:323-326) is
+        // tier 4+; the LineEditor defaults them to nil, matching an unset Reline.
         $this->line_editor->rerender();
 
         try {

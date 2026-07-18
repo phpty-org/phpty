@@ -93,6 +93,25 @@ final class LineEditor
     /** @var callable|null the previous SIGINT disposition, restored in finalize */
     private $old_trap = null;
 
+    /**
+     * The block readmultiline hands over to decide when a multiline buffer is
+     * complete (reline.rb:315). Receives the whole buffer joined with a trailing
+     * newline; a truthy return finishes the read. Set per-readline by Core, never
+     * reset in reset_variables — it belongs to the caller, not the buffer.
+     *
+     * @var (callable(string): bool)|null
+     */
+    private $confirm_multiline_termination_proc = null;
+
+    /**
+     * The dynamic-prompt proc (Reline#prompt_proc, reline.rb:323). Given the whole
+     * buffer, returns one prompt string per line; nil falls back to the static
+     * prompt on every row. Set per-readline by Core.
+     *
+     * @var (callable(list<string>): list<string>)|null
+     */
+    private $prompt_proc = null;
+
     public function __construct(?Config $config, IO $io)
     {
         $this->config = $config;
@@ -154,6 +173,18 @@ final class LineEditor
     public function multiline_off(): void
     {
         $this->is_multiline = false;
+    }
+
+    /** @param (callable(string): bool)|null $proc */
+    public function set_confirm_multiline_termination_proc(?callable $proc): void
+    {
+        $this->confirm_multiline_termination_proc = $proc;
+    }
+
+    /** @param (callable(list<string>): list<string>)|null $proc */
+    public function set_prompt_proc(?callable $proc): void
+    {
+        $this->prompt_proc = $proc;
     }
 
     /** For the render-differential unit tests, which set the size directly. */
@@ -234,6 +265,11 @@ final class LineEditor
     public function byte_pointer(): int
     {
         return $this->byte_pointer;
+    }
+
+    public function line_index(): int
+    {
+        return $this->line_index;
     }
 
     public function set_byte_pointer(int $val): void
@@ -426,6 +462,13 @@ final class LineEditor
             if (\count($this->buffer_of_lines) === 1) {
                 $this->buffer_of_lines[$this->line_index] = '';
                 $this->byte_pointer = 0;
+            } elseif ($this->line_index === \count($this->buffer_of_lines) - 1 && $this->line_index > 0) {
+                \array_pop($this->buffer_of_lines);
+                $this->line_index -= 1;
+                $this->byte_pointer = 0;
+            } elseif ($this->line_index < \count($this->buffer_of_lines) - 1) {
+                \array_splice($this->buffer_of_lines, $this->line_index, 1);
+                $this->byte_pointer = 0;
             }
         } elseif ($start !== null && $length !== null) {
             $before = \substr($this->current_line(), 0, $start);
@@ -556,10 +599,53 @@ final class LineEditor
 
     private function key_newline(string $key): void
     {
-        // Multiline insertion is tier 2; single-line readline never sets it.
         if ($this->is_multiline) {
-            // Intentionally minimal until tier 2 ports insert_new_line.
+            $nextLine = \substr($this->current_line(), $this->byte_pointer);
+            $cursorLine = \substr($this->current_line(), 0, $this->byte_pointer);
+            $this->insert_new_line($cursorLine, $nextLine);
         }
+    }
+
+    /**
+     * Split the current line at the cursor into two buffer lines, ported from
+     * line_editor.rb:277. The auto_indent_proc branch is tier-4+ (no indent proc
+     * in tier 2), so this reduces to the plain insert-and-advance.
+     */
+    private function insert_new_line(string $cursor_line, string $next_line): void
+    {
+        \array_splice($this->buffer_of_lines, $this->line_index + 1, 0, [$next_line]);
+        $this->buffer_of_lines[$this->line_index] = $cursor_line;
+        $this->line_index += 1;
+        $this->byte_pointer = 0;
+    }
+
+    /**
+     * Insert a (possibly multi-line) chunk of text at the cursor, splitting the
+     * current line around each embedded newline. The bracketed-paste target
+     * (Core maps :bracketed_paste_start to this), ported from line_editor.rb:1194.
+     */
+    public function insert_multiline_text(string $text): void
+    {
+        $pre = \substr($this->buffer_of_lines[$this->line_index], 0, $this->byte_pointer);
+        $post = \substr($this->buffer_of_lines[$this->line_index], $this->byte_pointer);
+        $normalised = \preg_replace('/\r\n?/', "\n", Unicode::safe_encode($text, $this->encoding()));
+        $lines = \explode("\n", $pre . $normalised . $post);
+        if ($lines === []) {
+            $lines = [''];
+        }
+        \array_splice($this->buffer_of_lines, $this->line_index, 1, $lines);
+        $this->line_index += \count($lines) - 1;
+        $this->byte_pointer = \strlen($this->buffer_of_lines[$this->line_index]) - \strlen($post);
+    }
+
+    /** Ask the caller's block whether the multiline buffer is complete (line_editor.rb:1189). */
+    public function confirm_multiline_termination(): bool
+    {
+        if ($this->confirm_multiline_termination_proc === null) {
+            return false;
+        }
+
+        return (bool) ($this->confirm_multiline_termination_proc)(\implode("\n", $this->buffer_of_lines) . "\n");
     }
 
     private function ed_next_char(string $key, int $arg = 1): void
@@ -605,8 +691,18 @@ final class LineEditor
     private function ed_newline(string $key): void
     {
         $this->process_insert(true);
-        // Single-line readline: accept immediately (multiline is tier 2).
-        $this->finish();
+        if ($this->is_multiline) {
+            // The vi_command branch (cursor-down via ed_next_history) is tier 5;
+            // emacs multiline accepts only at the last line, and only if the
+            // caller's confirm proc says the buffer is complete.
+            if ($this->line_index === \count($this->buffer_of_lines) - 1 && $this->confirm_multiline_termination()) {
+                $this->finish();
+            } else {
+                $this->key_newline($key);
+            }
+        } else {
+            $this->finish();
+        }
     }
 
     private function em_delete_prev_char(string $key, int $arg = 1): void
@@ -757,6 +853,38 @@ final class LineEditor
         }
     }
 
+    /**
+     * Up-arrow / C-p. Ported from line_editor.rb:1629; the leading branch — move
+     * the cursor up one buffer line, keeping its display column — is the tier-2
+     * multiline vertical motion. The history fall-through (move_history over
+     * Reline::HISTORY) is tier 3: with a single buffer line it would run, so it is
+     * a guarded no-op here, exactly as the unbound history commands were in tier 1.
+     */
+    private function ed_prev_history(string $key, int $arg = 1): void
+    {
+        if ($this->line_index > 0) {
+            $cursor = $this->current_byte_pointer_cursor();
+            $this->line_index -= 1;
+            $this->calculate_nearest_cursor($cursor);
+
+            return;
+        }
+        // move_history(...) is tier 3 — no history store yet.
+    }
+
+    /** Down-arrow / C-n. The multiline half of line_editor.rb:1646; see ed_prev_history. */
+    private function ed_next_history(string $key, int $arg = 1): void
+    {
+        if ($this->line_index < \count($this->buffer_of_lines) - 1) {
+            $cursor = $this->current_byte_pointer_cursor();
+            $this->line_index += 1;
+            $this->calculate_nearest_cursor($cursor);
+
+            return;
+        }
+        // move_history(...) is tier 3 — no history store yet.
+    }
+
     private function ed_ignore(string $key): void
     {
     }
@@ -797,18 +925,49 @@ final class LineEditor
      */
     private function check_multiline_prompt(array $buffer, ?string $mode_string): array
     {
+        // @vi_arg / @searching_prompt would override the prompt here (both vi/history,
+        // absent in tier 2), so the prompt is always the static @prompt.
         $prompt = $this->prompt;
-        // Single-line (tier 1): one prompt, then blanks for any extra lines.
-        $mode_string = $this->check_mode_string();
+        if (!$this->is_multiline) {
+            // Single-line: one prompt, then blanks for any extra lines.
+            $mode_string = $this->check_mode_string();
+            if ($mode_string !== null) {
+                $prompt = $mode_string . $prompt;
+            }
+            $result = [$prompt];
+            for ($i = 0; $i < \count($buffer) - 1; $i++) {
+                $result[] = '';
+            }
+
+            return $result;
+        }
+        if ($this->prompt_proc !== null) {
+            $prompt_list = \array_map(
+                static fn (string $pr): string => \str_replace("\n", '\\n', $pr),
+                ($this->prompt_proc)($buffer),
+            );
+            if ($prompt_list === []) {
+                $prompt_list = [$prompt];
+            }
+            if ($mode_string !== null) {
+                $prompt_list = \array_map(static fn (string $pr): string => $mode_string . $pr, $prompt_list);
+            }
+            // Upstream reassigns a `prompt` local here for @vi_arg/@searching_prompt;
+            // both are absent, so only the buffer-size padding below is observable.
+            if (\count($buffer) > \count($prompt_list)) {
+                $last = $prompt_list[\count($prompt_list) - 1];
+                for ($i = 0, $n = \count($buffer) - \count($prompt_list); $i < $n; $i++) {
+                    $prompt_list[] = $last;
+                }
+            }
+
+            return $prompt_list;
+        }
         if ($mode_string !== null) {
             $prompt = $mode_string . $prompt;
         }
-        $result = [$prompt];
-        for ($i = 0; $i < \count($buffer) - 1; $i++) {
-            $result[] = '';
-        }
 
-        return $result;
+        return \array_fill(0, \count($buffer), $prompt);
     }
 
     /**
