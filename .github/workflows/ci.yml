@@ -44,6 +44,9 @@ jobs:
     name: PHP ${{ matrix.php }} on ${{ matrix.os }}
     needs: libghostty
     runs-on: ${{ matrix.os }}
+    # Bounds a stuck Subject on a pty. A job-level limit works on every runner;
+    # the `timeout` command does not exist on the macOS runners.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -89,13 +92,14 @@ jobs:
 
       # The PHPUnit-Polyfills span (ADR-0010): the pinned bin lock is PHPUnit 12
       # (8.3+), so re-resolve per PHP — 8.2 gets 11, 8.4 gets 12 — and let the
-      # polyfills bridge them. `timeout` bounds a stuck Subject on a pty.
+      # polyfills bridge them. A stuck Subject is bounded by the job's
+      # timeout-minutes above.
       - name: test suite
         run: |
           export PHPTY_LIBGHOSTTY_VT="$PWD/libghostty-lib"
           composer install --no-interaction
           composer bin phpunit update --no-interaction --no-audit
-          timeout 300 vendor-bin/phpunit/vendor/bin/phpunit
+          vendor-bin/phpunit/vendor/bin/phpunit
 
   module-deps:
     name: prefer-lowest / ${{ matrix.module }}
