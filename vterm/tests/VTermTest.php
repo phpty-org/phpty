@@ -44,6 +44,22 @@ final class VTermTest extends TestCase
         $this->assertSame($expected, $row);
     }
 
+    public function testEastAsianAmbiguousCharactersAreNarrow(): void
+    {
+        // U+2192 (→) is East Asian Ambiguous: one column in a Western context,
+        // two in a terminal configured for wide ambiguous width. libghostty — like
+        // PsySH's own width path — hardcodes one. So this harness renders such
+        // characters exactly as PsySH does and cannot exhibit that divergence.
+        // See docs/adr/0007-harness-first-reline-undecided.md.
+        $vterm = new VTerm(1, 10);
+        $vterm->write('→X');
+
+        $this->assertSame(Wide::narrow(), $vterm->cellAt(0, 0)->wide());
+        $this->assertSame('→', $vterm->cellAt(0, 0)->text());
+        // X lands in the very next column — the arrow occupied only one.
+        $this->assertSame('X', $vterm->cellAt(0, 1)->text());
+    }
+
     public function testTheTwoKindsOfEmptyCellAreDistinguishable(): void
     {
         $vterm = new VTerm(1, 10);

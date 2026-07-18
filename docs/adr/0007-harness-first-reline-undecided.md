@@ -51,10 +51,13 @@ plus a real and narrower finding underneath it.
 
 This is recorded because it is the same claim the whole project rests on — that
 you cannot know what a terminal renders without rendering it — arriving one
-level up, uninvited. It is also why point 3's remaining claim is still hedged
-with "should": the ambiguous-width mismatch is verified in the width function,
-but its effect on a real screen has not been observed — and, per the consequences
-below, will not be for some time.
+level up, uninvited. It is also why point 3's remaining claim stays hedged. The
+ambiguous-width behaviour is now observed on a rendered grid, not only in the
+width function: a VTerm test drives `→X` and the arrow takes a single column. But
+what that observation confirms is the harness *agreeing* with PsySH — both draw
+the arrow narrow. The divergence itself, which a terminal set to draw ambiguous
+width wide would show, still cannot be observed here, and per the consequences
+below will not be for some time.
 
 ## Consequences
 
