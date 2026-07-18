@@ -120,8 +120,8 @@ final class VTerm
 
         $point = $this->ffi->new('GhosttyPoint');
         $point->tag = self::POINT_TAG_ACTIVE;
-        $point->value->coordinate->x = $col;
-        $point->value->coordinate->y = $row;
+        $point->value->x = $col;
+        $point->value->y = $row;
 
         $ref = $this->ffi->new('GhosttyGridRef');
         $ref->size = FFI::sizeof($ref);

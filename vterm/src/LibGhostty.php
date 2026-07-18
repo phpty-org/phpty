@@ -26,14 +26,15 @@ final class LibGhostty
             size_t max_scrollback;
         } GhosttyTerminalOptions;
 
+        // The header declares value as a union { GhosttyPointCoordinate; uint64_t[2]; }.
+        // PHP 7.4's FFI cannot pass a struct containing a union by value — it is
+        // what breaks ghostty_terminal_grid_ref there. We only ever use the
+        // coordinate variant, so value is declared as an ABI-equivalent struct
+        // (16 bytes, same layout) with no union. See VTerm::cellAt.
         typedef struct {
             uint16_t x;
             uint32_t y;
-        } GhosttyPointCoordinate;
-
-        typedef union {
-            GhosttyPointCoordinate coordinate;
-            uint64_t _padding[2];
+            uint64_t _reserved;
         } GhosttyPointValue;
 
         typedef struct {
